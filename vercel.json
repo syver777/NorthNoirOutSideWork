@@ -1,0 +1,70 @@
+{
+  "version": 2,
+  "framework": "vite",
+  "installCommand": "bun install",
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
+    },
+    {
+      "src": "api/**/*.ts",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/concatenate.py",
+      "use": "@vercel/python",
+      "config": {
+        "buildCommand": "./api/vercel-build.sh"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/pages/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/products/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/collections/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/blogs/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/account",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/customer_authentication/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "src": "/cdn/(.*)",
+      "dest": "/api/gone"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "/assets/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}

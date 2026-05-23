@@ -1,0 +1,6 @@
+{
+  "deploy": {
+    "org": "storyscriptai",
+    "app": "storyscriptai-setup-prompt"
+  }
+}

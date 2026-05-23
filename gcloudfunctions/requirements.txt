@@ -1,0 +1,5 @@
+functions-framework==3.*
+requests>=2.31.0
+supabase>=2.0.0
+fal-client>=0.7.0
+youtube-transcript-api>=1.0.0

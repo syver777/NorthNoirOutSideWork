@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+
+# Block old Shopify paths (domain was previously used for a different site)
+Disallow: /pages/
+Disallow: /products/
+Disallow: /collections/
+Disallow: /blogs/
+Disallow: /account
+Disallow: /customer_authentication/
+Disallow: /cdn/
+
+Sitemap: https://northnoir.com/sitemap.xml
