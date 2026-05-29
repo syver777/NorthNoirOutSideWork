@@ -1,4 +1,3 @@
-import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useState } from 'react';
 import { AuthProvider } from './contexts/AuthContext';
@@ -16,6 +15,7 @@ import TextToSpeechContainer from './pages/TextToSpeechContainer';
 import VideoGeneratorContainer from './pages/VideoGeneratorContainer';
 import TextToVideoGeneratorContainer from './pages/TextToVideoGeneratorContainer';
 import MotionGraphicsGeneratorContainer from './pages/MotionGraphicsGeneratorContainer';
+import RealFootageGeneratorContainer from './pages/RealFootageGeneratorContainer';
 import ImageToVideoGeneratorContainer from './pages/ImageToVideoGeneratorContainer';
 import About from './pages/About';
 import Pricing from './pages/Pricing';
@@ -116,6 +116,11 @@ function App() {
             <Route path="/motion-graphics-generator" element={
               <ProtectedRoute>
                 <MotionGraphicsGeneratorContainer />
+              </ProtectedRoute>
+            } />
+            <Route path="/real-footage-generator" element={
+              <ProtectedRoute>
+                <RealFootageGeneratorContainer />
               </ProtectedRoute>
             } />
             <Route path="/image-to-video" element={

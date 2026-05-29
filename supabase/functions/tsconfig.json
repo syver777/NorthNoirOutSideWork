@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "npm:@supabase/supabase-js@2": ["../../node_modules/@supabase/supabase-js"],
+      "npm:@supabase/supabase-js@2/*": ["../../node_modules/@supabase/supabase-js/*"]
+    }
+  },
+  "include": ["./**/*.ts", "./**/*.d.ts"]
+}

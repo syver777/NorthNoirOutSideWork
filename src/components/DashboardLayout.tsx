@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { BookOpen, LogOut, CreditCard, FileText, GitCompare, Image as ImageIcon, Home, Video, Mic, Image, GraduationCap, Sparkles } from 'lucide-react';
+import { BookOpen, LogOut, CreditCard, FileText, GitCompare, Image as ImageIcon, Home, Video, Mic, Image, GraduationCap, Sparkles, Film } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useIsLegacyPlan } from '../hooks/useIsLegacyPlan';
 import { getPlanMaxTokens } from '../data/planMaxTokens';
@@ -137,6 +137,11 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ children }) => {
       name: 'Text-To-Video',
       path: '/text-to-video-generator',
       icon: <Video className="h-5 w-5" />
+    },
+    {
+      name: 'Real Footage',
+      path: '/real-footage-generator',
+      icon: <Film className="h-5 w-5" />
     },
     {
       name: 'Motion Graphics',
