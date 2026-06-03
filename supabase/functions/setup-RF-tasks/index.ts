@@ -49,6 +49,42 @@ async function logError(message: string, error: any) {
   } catch (_) { /* silent */ }
 }
 
+/** Start Phase 2 — must await; fire-and-forget often dies when the handler returns. */
+async function triggerFirstRFBatch(payload: {
+  group_id: string;
+  user_id: string;
+  current_batch_number: number;
+  tab: number;
+  variant: number;
+}): Promise<void> {
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: supabaseServiceRoleKey,
+    Authorization: `Bearer ${supabaseServiceRoleKey}`,
+  };
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${supabaseUrl}/functions/v1/trigger-next-RF`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
+      }
+      console.log(`trigger-next-RF ok (attempt ${attempt}): ${text.slice(0, 200)}`);
+      return;
+    } catch (err) {
+      lastError = err as Error;
+      console.error(`trigger-next-RF attempt ${attempt} failed: ${lastError.message}`);
+      if (attempt < 3) await new Promise(r => setTimeout(r, 400 * attempt));
+    }
+  }
+  await logError('Error triggering first RF batch after retries', lastError);
+}
+
 async function insertTasksInBatches(tasks: any[], startTime: number, maxRuntime: number) {
   const CHUNK = 20;
   for (let i = 0; i < tasks.length; i += CHUNK) {
@@ -247,22 +283,12 @@ Deno.serve(async (req: Request) => {
       .update({ status: 'queued', updated_at: new Date().toISOString() })
       .eq('id', tasks[0].id);
 
-    fetch(`${supabaseUrl}/functions/v1/trigger-next-RF`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': supabaseServiceRoleKey,
-      },
-      body: JSON.stringify({
-        group_id,
-        user_id,
-        current_batch_number: 0,
-        tab,
-        variant: finalVariant,
-      }),
-    }).catch(err => {
-      console.error(`Error triggering first TTV batch: ${err.message}`);
-      logError('Error triggering first TTV batch', err);
+    await triggerFirstRFBatch({
+      group_id,
+      user_id,
+      current_batch_number: 0,
+      tab,
+      variant: finalVariant,
     });
 
     return new Response(
