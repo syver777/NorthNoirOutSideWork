@@ -72,6 +72,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         .from('story_documents')
         .select('id, title, description, group_id, file_path, word_count')
         .eq('user_id', userId)
+        .in('version', [1, 2])
         .order('created_at', { ascending: false })
         .limit(50);
       setDocuments((data as StoryDocument[]) ?? []);
@@ -277,6 +278,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         <div className="space-y-6 bg-surface-secondary/50 border border-border rounded-xl p-6">
           <div>
             <label className="block text-sm text-text-secondary mb-2">Story document</label>
+            <p className="text-xs text-text-dim mb-2">Original uploaded stories only — finished clips appear under Documents as RF Outputs.</p>
             <select
               value={selectedDocId}
               onChange={e => setSelectedDocId(e.target.value)}

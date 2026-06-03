@@ -20,11 +20,18 @@ export interface StockSearchResult {
   candidates?: StockClipCandidate[];
 }
 
+/** Prefer smaller renditions — edge functions + storage have tight size limits. */
 function pickBestMp4(files: { quality?: string; width?: number; link?: string }[]): string | null {
-  if (!files?.length) return null;
-  const sorted = [...files].sort((a, b) => (b.width ?? 0) - (a.width ?? 0));
-  const hd = sorted.find(f => f.link && (f.quality === 'hd' || f.quality === 'sd' || f.quality === 'uhd'));
-  return (hd ?? sorted[0])?.link ?? null;
+  const withLink = files.filter(f => f.link);
+  if (!withLink.length) return null;
+  const sd = withLink.find(f => f.quality === 'sd');
+  if (sd?.link) return sd.link;
+  const moderate = [...withLink]
+    .sort((a, b) => (a.width ?? 9999) - (b.width ?? 9999))
+    .find(f => (f.width ?? 0) > 0 && (f.width ?? 0) <= 1280);
+  if (moderate?.link) return moderate.link;
+  const smallest = [...withLink].sort((a, b) => (a.width ?? 9999) - (b.width ?? 9999));
+  return smallest[0]?.link ?? null;
 }
 
 export async function searchPexels(query: string, perPage = 5): Promise<StockClipCandidate[]> {
@@ -102,9 +109,22 @@ export async function searchCoverr(query: string, perPage = 5): Promise<StockCli
   return out;
 }
 
+/** Short keyword phrase for stock APIs (TTV prompts include long warnings / emoji). */
+export function sanitizeStockSearchQuery(query: string): string {
+  let q = query.trim();
+  const criticalIdx = q.search(/\n\s*⚠️|\n\s*CRITICAL REQUIREMENT/i);
+  if (criticalIdx >= 0) q = q.slice(0, criticalIdx);
+  q = q.split('\n').map((l) => l.trim()).find(Boolean) ?? q;
+  q = q.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
+  q = q.replace(/[^\w\s,.-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length > 7) q = words.slice(0, 7).join(' ');
+  return q.slice(0, 100);
+}
+
 /** Merge Pexels + Coverr results; first result is default pick (Pexels preferred). */
 export async function searchStockFootage(query: string): Promise<StockSearchResult> {
-  const trimmed = query?.trim();
+  const trimmed = sanitizeStockSearchQuery(query ?? '');
   if (!trimmed) return { status: 'failed', error: 'Empty search query' };
 
   const results: StockClipCandidate[] = [];
