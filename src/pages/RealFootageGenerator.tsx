@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Film, AlertCircle, CheckCircle2, X, BookOpen, Play, Download, RefreshCw,
+  Film, AlertCircle, CheckCircle2, X, Play, Download, RefreshCw,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
@@ -33,8 +33,9 @@ interface StoryDocument {
   group_id?: string;
   file_path: string;
   word_count?: number;
-  is_corrected?: boolean;
-  created_at?: string;
+  is_corrected: boolean;
+  created_at: string;
+  version?: number;
 }
 
 export interface RealFootageGeneratorRef {
@@ -197,12 +198,24 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
     const load = async () => {
       const { data } = await supabase
         .from('story_documents')
-        .select('id, title, description, group_id, file_path, word_count, is_corrected, created_at')
+        .select('id, title, description, group_id, file_path, word_count, is_corrected, created_at, version')
         .eq('user_id', userId)
         .in('version', [1, 2])
         .order('created_at', { ascending: false })
         .limit(50);
-      setDocuments((data as StoryDocument[]) ?? []);
+      setDocuments(
+        (data ?? []).map((d): StoryDocument => ({
+          id: d.id,
+          title: d.title,
+          description: d.description,
+          group_id: d.group_id,
+          file_path: d.file_path,
+          word_count: d.word_count,
+          is_corrected: d.is_corrected ?? false,
+          created_at: d.created_at ?? new Date().toISOString(),
+          version: d.version,
+        })),
+      );
     };
     load();
     return () => {
@@ -560,7 +573,12 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       const data = await res.json();
       setSingleTaskId(data.task_id);
     } catch (err) {
-      setError((err as Error).message || 'Failed to start clip search');
+      const msg = (err as Error).message || 'Failed to start clip search';
+      setError(
+        msg === 'Failed to fetch'
+          ? 'Could not reach the single-RF edge function. Ensure it is deployed on your Supabase project (functions/v1/single-RF).'
+          : msg,
+      );
       setSingleGenState('error');
     }
   };
