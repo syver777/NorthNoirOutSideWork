@@ -63,6 +63,22 @@ Also run in SQL editor (if not already applied):
 - Deno Deploy workers
 - GCloud final-video
 
-## 6. Push when ready
+## 6. Frontend (Syver feedback — Jun 2026)
+
+Real Footage page now mirrors Text-to-Video layout:
+
+- **What to Expect** info box
+- **Mode:** Existing Document vs Individual Prompt (`single-RF`)
+- **TabManager** for enterprise multi-tab (`page: rf`)
+- **DocumentSelector** upload + listbox (story docs v1–2)
+- **Visual style** grid + custom style (same cards as TTV)
+- **StatusBanner** for generating / complete
+- Per-tab settings via `useTabSessionStorage`
+
+## 7. Phase 2 auto-start
+
+Commit `46917cf`: `setup-RF-tasks` awaits `trigger-next-RF` with retries.
+
+## 8. Push when ready
 
 Test full flow locally, then push branch for Syver review.

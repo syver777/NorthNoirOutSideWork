@@ -1458,6 +1458,75 @@ export async function getUserActiveTabs(userId: string, page: string = 'story'):
     if (page === 'video') {
       return getUserActiveVideoTabs(userId);
     }
+
+    // Real Footage — enrich tabs from RF_tasks (exclude single-clip rows)
+    if (page === 'rf') {
+      const tabs = await getTabsForPage(userId, 'rf');
+      if (tabs.length === 0) return [];
+
+      const { data: tasks, error } = await supabase
+        .from('RF_tasks')
+        .select('tab, group_id, variant, status, progress, batch_number, total_batches, single_rf')
+        .eq('user_id', userId)
+        .eq('single_rf', false)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      const tabGroups = new Map<number, typeof tasks>();
+      (tasks ?? []).forEach(task => {
+        if (!tabGroups.has(task.tab)) tabGroups.set(task.tab, []);
+        tabGroups.get(task.tab)!.push(task);
+      });
+
+      return tabs.map(tab => {
+        const allTabTasks = tabGroups.get(tab.tab) ?? [];
+        let tabTasks = tab.groupId
+          ? allTabTasks.filter(t => t.group_id === tab.groupId)
+          : [];
+        if (tabTasks.length > 0) {
+          const maxVariant = Math.max(...tabTasks.map(t => t.variant || 1));
+          tabTasks = tabTasks.filter(t => (t.variant || 1) === maxVariant);
+        }
+
+        if (!tab.groupId || tabTasks.length === 0) {
+          return { ...tab, progress: 0, estimatedTokens: 0, tokensUsed: 0, totalBatches: 0, completedBatches: 0 };
+        }
+
+        const groupId = tabTasks[0].group_id;
+        const errorTasks = tabTasks.filter(t => t.status === 'error');
+        const allCompleted = tabTasks.every(t => t.status === 'completed' || t.status === 'completed_final');
+        let status: TabInfo['status'];
+        if (errorTasks.length > 0) status = 'error';
+        else if (allCompleted) status = 'complete';
+        else if (tabTasks.some(t => ['pending', 'queued', 'running'].includes(t.status))) status = 'generating';
+        else status = 'idle';
+
+        if (tab.status === 'generating' && status === 'complete') status = 'generating';
+        else if (tab.status === 'complete' && status !== 'complete') status = 'complete';
+
+        const progress = tabTasks.length > 0
+          ? Math.round(tabTasks.reduce((sum, t) => sum + (t.progress || 0), 0) / tabTasks.length)
+          : 0;
+        const totalBatches = tabTasks[0].total_batches || tabTasks.length;
+        const completedBatches = tabTasks.filter(t => t.status === 'completed' || t.status === 'completed_final').length;
+
+        if (tab.status !== status || tab.groupId !== groupId) {
+          updateTabStatus(userId, page, tab.tab, status, groupId).catch(() => {});
+        }
+
+        return {
+          ...tab,
+          groupId,
+          status,
+          progress,
+          estimatedTokens: 0,
+          tokensUsed: 0,
+          totalBatches,
+          completedBatches,
+        };
+      });
+    }
     
     // Original story page logic follows
     console.log(`[getUserActiveTabs] Fetching tabs for user ${userId}, page: ${page}`);
