@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Film, AlertCircle, CheckCircle2, X, Play, Download, RefreshCw,
+  Film, AlertCircle, CheckCircle2, X, Download, RefreshCw,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
@@ -9,7 +9,6 @@ import DashboardLayout from '../components/DashboardLayout';
 import StatusBanner from '../components/StatusBanner';
 import TabManager from '../components/TabManager';
 import { DocumentSelector } from '../components/FileUploadComponents';
-import { TTV_STYLES, getStyleVideoUrl } from '../components/VideoModelSelector';
 import { useTabSessionStorage } from '../hooks/useTabSessionStorage';
 import { ensureTabExists, updateTabStatus, type TabInfo } from '../utils/tabManager';
 import { sanitizeFileName } from '../utils/videoGeneratorUtils';
@@ -24,7 +23,6 @@ const CLIP_DURATIONS = [4, 5, 6, 8, 10];
 const WORDS_PER_SECOND = 2.08;
 const MAX_WORD_COUNT = 70000;
 const MAX_FILE_SIZE_MB = 1;
-const STYLE_PREVIEW_MODEL = 'grok';
 
 interface StoryDocument {
   id: string;
@@ -64,60 +62,6 @@ const formatDuration = (seconds: number) => {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 };
 
-function StyleVideoCard({
-  name,
-  description,
-  videoUrl,
-  isSelected,
-  onClick,
-}: {
-  name: string;
-  description: string;
-  videoUrl: string;
-  isSelected: boolean;
-  onClick: () => void;
-}) {
-  const videoRef = React.useRef<HTMLVideoElement>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-
-  return (
-    <div
-      className={`relative bg-surface-elevated rounded-xl overflow-hidden cursor-pointer transition-all duration-200 ${
-        isSelected ? 'ring-2 ring-accent-text' : 'hover:ring-2 hover:ring-border-subtle'
-      }`}
-      onClick={onClick}
-      onMouseEnter={() => {
-        videoRef.current?.play().then(() => setIsPlaying(true)).catch(() => {});
-      }}
-      onMouseLeave={() => {
-        if (videoRef.current) {
-          videoRef.current.pause();
-          videoRef.current.currentTime = 0;
-          setIsPlaying(false);
-        }
-      }}
-    >
-      <div className="aspect-video w-full relative">
-        <video ref={videoRef} src={videoUrl} className="w-full h-full object-cover" preload="metadata" muted loop playsInline />
-        <div className={`absolute inset-0 flex items-center justify-center transition-opacity duration-200 pointer-events-none ${isPlaying ? 'opacity-0' : 'bg-black/25'}`}>
-          <div className="w-10 h-10 bg-black/60 rounded-full flex items-center justify-center">
-            <Play className="h-5 w-5 text-white ml-0.5" />
-          </div>
-        </div>
-      </div>
-      <div className="p-4">
-        <h3 className="text-base font-medium text-white mb-1">{name}</h3>
-        <p className="text-sm text-text-dim">{description}</p>
-      </div>
-      {isSelected && (
-        <div className="absolute top-2 right-2 bg-accent text-white rounded-full p-1">
-          <CheckCircle2 className="h-5 w-5" />
-        </div>
-      )}
-    </div>
-  );
-}
-
 const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function RealFootageGenerator(
   {
     userId,
@@ -141,13 +85,8 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
 
   const [inputMode, setInputMode] = useTabSessionStorage<'document' | 'prompt'>('rf_inputMode', 'document', currentTab);
   const [singlePrompt, setSinglePrompt] = useTabSessionStorage<string>('rf_singlePrompt', '', currentTab);
-  const [rfStyle, setRfStyle] = useTabSessionStorage<string>('rf_style', TTV_STYLES.find(s => s.name === 'Cinematic Film')?.style ?? TTV_STYLES[0].style, currentTab);
   const [clipDuration, setClipDuration] = useTabSessionStorage<number>('rf_clipDuration', 5, currentTab);
   const [totalAudioDuration, setTotalAudioDuration] = useTabSessionStorage<number>('rf_audioDuration', 60, currentTab);
-
-  const [showAllStyles, setShowAllStyles] = useState(false);
-  const [isCustomStyle, setIsCustomStyle] = useState(false);
-  const [customStyleText, setCustomStyleText] = useState('');
 
   const [generationState, setGenerationState] = useState<'idle' | 'generating' | 'complete' | 'error'>('idle');
   const [currentPhase, setCurrentPhase] = useState<'prompts' | 'clips' | 'complete'>('prompts');
@@ -168,7 +107,6 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
   const stoppedRef = useRef(false);
   const phaseRef = useRef<'prompts' | 'clips' | 'complete'>('prompts');
 
-  const activeStyle = isCustomStyle ? customStyleText.trim() : rfStyle;
   const isGenerating = generationState === 'generating';
   const isComplete = generationState === 'complete';
 
@@ -456,10 +394,6 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       setError('Select a story document');
       return;
     }
-    if (!activeStyle) {
-      setError('Select a visual style');
-      return;
-    }
     if (totalAudioDuration <= 0) {
       setError('Set story runtime (seconds)');
       return;
@@ -504,7 +438,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           file_path: doc.file_path,
           story_title: doc.title,
           description: doc.description || doc.title,
-          style: activeStyle,
+          style: '',
           video_model: 'stock',
           video_duration: clipDuration,
           totalAudioDuration,
@@ -537,10 +471,6 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       setError('Please enter a search prompt');
       return;
     }
-    if (!activeStyle) {
-      setError('Select a visual style');
-      return;
-    }
     setError(null);
     setSingleGenState('generating');
     setSingleVideoUrl(null);
@@ -561,7 +491,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           group_id: gid,
           story_title: 'single_rf',
           prompt: singlePrompt.trim(),
-          style_prompt: activeStyle,
+          style_prompt: '',
           video_duration: clipDuration,
           tab: currentTab,
         }),
@@ -620,7 +550,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
   };
 
   const canGenerateDocument =
-    !!selectedDocument && !!activeStyle && totalAudioDuration > 0 && !isGenerating && !isComplete;
+    !!selectedDocument && totalAudioDuration > 0 && !isGenerating && !isComplete;
 
   const configCollapsed =
     isGenerating || isComplete || singleGenState === 'generating' || singleGenState === 'complete';
@@ -635,7 +565,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         <div className="relative mb-8 dash-animate-in">
           <h1 className="text-4xl font-display font-semibold text-white tracking-tight">Real Footage Generator</h1>
           <p className="text-text-secondary mt-2">
-            Turn your story into stock video clips from Coverr and Pexels. Search terms are generated with Claude Sonnet 4.6.
+            Turn your story into stock video clips. Search terms are generated with Claude Sonnet 4.6.
           </p>
           <Link to="/home" className="text-sm text-amber-400/80 hover:text-amber-300 mt-2 inline-block">
             ← Back to Home
@@ -645,13 +575,13 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         <div className="mt-5 p-5 rounded-2xl bg-surface-card backdrop-blur-sm border border-border-card dash-animate-in mb-6">
           <h3 className="text-xl font-semibold mb-2 text-accent">What to Expect</h3>
           <p className="text-[15px] text-white/80 leading-relaxed">
-            Real Footage takes your story (or a single search prompt) and finds matching stock clips from Coverr and Pexels.
+            Real Footage takes your story (or a single search prompt) and finds matching stock clips.
             Claude generates search keywords per scene, then the system downloads and saves clips to your Documents folder as RF Outputs.
           </p>
           <div className="mt-4 pt-4 border-t border-white/10">
             <p className="text-sm text-text-muted leading-relaxed">
               Choose <strong className="text-white/90">Existing Document</strong> for a full story run, or <strong className="text-white/90">Individual Prompt</strong> for one stock clip.
-              Set visual style and clip timing, then generate. Clips appear under Documents as RF Outputs.
+              Set clip timing, then generate. Clips appear under Documents as RF Outputs.
             </p>
           </div>
         </div>
@@ -698,7 +628,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         )}
 
         {singleGenState === 'generating' && (
-          <StatusBanner variant="info" title="Finding stock clip…" subtitle="Searching Coverr and Pexels. This usually takes under a minute." />
+          <StatusBanner variant="info" title="Finding stock clip…" subtitle="Searching stock footage. This usually takes under a minute." />
         )}
 
         {singleGenState === 'complete' && singleVideoUrl && (
@@ -771,7 +701,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
               <div className="bg-surface-card rounded-xl p-6">
                 <h2 className="text-xl font-semibold text-white mb-4">Individual Stock Clip</h2>
                 <p className="text-text-muted mb-6">
-                  Describe the scene you need. We search Coverr and Pexels and save one matching clip.
+                  Describe the scene you need. We search stock footage and save one matching clip.
                 </p>
                 <label className="block text-sm font-medium text-white mb-3">Search prompt</label>
                 <textarea
@@ -788,49 +718,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
 
             <div className="p-4 rounded-xl bg-surface-card border border-border-card">
               <p className="text-[10px] font-mono tracking-[0.15em] text-text-label uppercase mb-2">Source</p>
-              <p className="text-white font-medium">Stock footage — Coverr + Pexels</p>
-              <p className="text-sm text-text-muted mt-1">No AI video generation; clips are real stock video matched to your prompts.</p>
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-mono tracking-[0.15em] text-text-label uppercase mb-4">Visual Style</label>
-              <div className="grid md:grid-cols-2 gap-6">
-                {TTV_STYLES.slice(0, showAllStyles ? TTV_STYLES.length : 4).map(s => (
-                  <StyleVideoCard
-                    key={s.name}
-                    name={s.name}
-                    description={s.description}
-                    videoUrl={getStyleVideoUrl(STYLE_PREVIEW_MODEL, s.videoFileName)}
-                    isSelected={!isCustomStyle && rfStyle === s.style}
-                    onClick={() => { setRfStyle(s.style); setIsCustomStyle(false); }}
-                  />
-                ))}
-              </div>
-              {TTV_STYLES.length > 4 && (
-                <div className="flex justify-center mt-4">
-                  <button
-                    type="button"
-                    onClick={() => setShowAllStyles(p => !p)}
-                    className="px-4 py-2 bg-white/10 text-white rounded-xl hover:bg-white/15 transition-colors"
-                  >
-                    {showAllStyles ? 'Show Less' : `Show More +${TTV_STYLES.length - 4}`}
-                  </button>
-                </div>
-              )}
-              <div className="mt-6 rounded-xl overflow-hidden border border-border-card">
-                <div className="p-4">
-                  <h3 className="text-lg font-medium text-white mb-2">Custom Style</h3>
-                  <textarea
-                    value={isCustomStyle ? customStyleText : ''}
-                    onChange={e => { setCustomStyleText(e.target.value.slice(0, 1200)); setIsCustomStyle(true); }}
-                    onClick={() => setIsCustomStyle(true)}
-                    placeholder="Describe your visual style for stock search context…"
-                    rows={4}
-                    maxLength={1200}
-                    className="w-full bg-surface-input border border-white/[0.13] rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-red-900/60"
-                  />
-                </div>
-              </div>
+              <p className="text-white font-medium">Stock footage</p>
             </div>
 
             {inputMode === 'document' && (
@@ -948,7 +836,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
               Generate Real Footage
             </button>
             {!canGenerateDocument && (
-              <p className="text-xs text-text-dim text-center">Select a document, style, and runtime to enable generation.</p>
+              <p className="text-xs text-text-dim text-center">Select a document and runtime to enable generation.</p>
             )}
           </div>
         )}
@@ -969,7 +857,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
             <button
               type="button"
               onClick={handleGenerateSingle}
-              disabled={!singlePrompt.trim() || !activeStyle}
+              disabled={!singlePrompt.trim()}
               className="w-full flex justify-center items-center gap-2 px-4 py-3 bg-accent text-white rounded-xl hover:bg-accent-hover disabled:opacity-50"
             >
               <Film className="w-5 h-5" />

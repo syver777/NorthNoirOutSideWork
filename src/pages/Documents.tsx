@@ -2753,7 +2753,10 @@ export default function Documents() {
     } else if (version === 13) {
       baseLabel = 'Corrected TTV Prompts';
     } else if (version === 14) {
-      baseLabel = 'Original TTV Videos';
+      baseLabel =
+        doc.title?.startsWith('RF Outputs:') || doc.file_path?.includes('/RF-')
+          ? 'Real Footage Clips'
+          : 'Original TTV Videos';
     } else if (version === 15) {
       baseLabel = 'Corrected TTV Videos';
     } else if (version === 16) {
