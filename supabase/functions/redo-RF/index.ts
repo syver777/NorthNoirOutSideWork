@@ -9,6 +9,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { getCorsHeaders } from '../_shared/cors.ts';
 import { planMaxTokensForUser } from '../_shared/planMaps.ts';
+import { RF_STOCK_TOKENS_PER_CLIP } from '../_shared/rfTokenCosts.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SECRET_KEY') ?? '';
@@ -19,8 +20,6 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
 
 const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-const RF_STOCK_TOKENS_PER_CLIP = 500;
-
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 function sanitizeTitle(title: string): string {
@@ -30,11 +29,6 @@ function sanitizeTitle(title: string): string {
 function sanitizeFeedback(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   return raw.trim().slice(0, 250);
-}
-
-function applyFeedback(query: string, feedback: string): string {
-  if (!feedback) return query;
-  return `${query}\n\nUser feedback for revision: ${feedback}`;
 }
 
 async function logError(message: string, error: unknown) {
@@ -60,7 +54,12 @@ async function getUserIdFromToken(authHeader: string | null): Promise<string | n
   }
 }
 
-async function callGenerateRF(query: string): Promise<{
+async function callGenerateRF(
+  query: string,
+  targetDuration?: number,
+  revisionFeedback?: string,
+  excludeStock?: { source: string; id: string },
+): Promise<{
   status: string;
   video_url?: string;
   stock_source?: string;
@@ -70,7 +69,14 @@ async function callGenerateRF(query: string): Promise<{
   const res = await fetch(`${supabaseUrl}/functions/v1/generate-RF`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', apikey: supabaseServiceRoleKey },
-    body: JSON.stringify({ mode: 'search', query }),
+    body: JSON.stringify({
+      mode: 'search',
+      query,
+      target_duration: targetDuration,
+      revision_feedback: revisionFeedback || undefined,
+      exclude_stock_source: excludeStock?.source,
+      exclude_stock_id: excludeStock?.id,
+    }),
   });
   const text = await res.text();
   let data: Record<string, unknown>;
@@ -115,6 +121,12 @@ async function completeRedoTask(
     if (attempt >= 3) throw new Error(`Storage upload error: ${error.message}`);
     await sleep(5_000);
   }
+
+  // Reset token_updated so the DB trigger bills again on redo (same flat clip cost).
+  await supabase
+    .from('RF_tasks')
+    .update({ token_updated: false, updated_at: new Date().toISOString() })
+    .eq('id', taskId);
 
   const { error: updateErr } = await supabase
     .from('RF_tasks')
@@ -213,7 +225,12 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const searchQuery = applyFeedback(String(task.batch[0].prompt), feedback);
+    const basePrompt = String(task.batch[0].prompt);
+
+    const excludeStock =
+      task.stock_source && task.stock_id
+        ? { source: String(task.stock_source), id: String(task.stock_id) }
+        : undefined;
 
     const { error: updateErr } = await supabase
       .from('RF_tasks')
@@ -241,7 +258,13 @@ Deno.serve(async (req: Request) => {
     EdgeRuntime.waitUntil(
       (async () => {
         try {
-          const gen = await callGenerateRF(searchQuery.trim());
+          const targetDuration = Number(task.video_duration) > 0 ? Number(task.video_duration) : undefined;
+          const gen = await callGenerateRF(
+            basePrompt.trim(),
+            targetDuration,
+            feedback || undefined,
+            excludeStock,
+          );
           if (gen.status !== 'completed' || !gen.video_url) {
             throw new Error(gen.error ?? 'No stock clip found');
           }

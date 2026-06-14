@@ -1,5 +1,6 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { rfPromptVersion } from '../_shared/rfVersions.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -518,7 +519,7 @@ Deno.serve(async (req) => {
             output_tokens: 0,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
-            version: is_corrected ? 13 : 12,
+            version: rfPromptVersion(is_corrected),
             language: validatedLanguage,
             model: validatedModel,
             video_model,

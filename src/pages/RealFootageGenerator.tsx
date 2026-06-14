@@ -1,17 +1,25 @@
 import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Link } from 'react-router-dom';
+import { Listbox, Transition } from '@headlessui/react';
 import {
-  Film, AlertCircle, CheckCircle2, X, Download, RefreshCw,
+  Film, AlertCircle, CheckCircle2, X, Download, RefreshCw, ChevronDown, Info, Play, Folder,
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 import DashboardLayout from '../components/DashboardLayout';
 import StatusBanner from '../components/StatusBanner';
 import TabManager from '../components/TabManager';
+import RedoFeedbackModal from '../components/RedoFeedbackModal';
 import { DocumentSelector } from '../components/FileUploadComponents';
 import { useTabSessionStorage } from '../hooks/useTabSessionStorage';
 import { ensureTabExists, updateTabStatus, type TabInfo } from '../utils/tabManager';
 import { sanitizeFileName } from '../utils/videoGeneratorUtils';
+import { uploadWithTus } from '../utils/tusUpload';
+import {
+  RF_CLIP_DURATION_MIN,
+  RF_CLIP_DURATION_MAX,
+  clampRFClipDuration,
+} from '../constants/rfClipDuration';
 
 const supabase = createClient(
   import.meta.env.SUPABASE_URL,
@@ -19,8 +27,12 @@ const supabase = createClient(
 );
 
 const POLL_MS = 6000;
-const CLIP_DURATIONS = [4, 5, 6, 8, 10];
 const WORDS_PER_SECOND = 2.08;
+
+function cacheBustSignedUrl(url: string): string {
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}cb=${Date.now()}`;
+}
 const MAX_WORD_COUNT = 70000;
 const MAX_FILE_SIZE_MB = 1;
 
@@ -33,6 +45,13 @@ interface StoryDocument {
   word_count?: number;
   is_corrected: boolean;
   created_at: string;
+  version?: number;
+}
+
+interface AudioFile {
+  path: string;
+  name: string;
+  duration: number;
   version?: number;
 }
 
@@ -62,6 +81,27 @@ const formatDuration = (seconds: number) => {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 };
 
+/** Read duration from a URL (signed storage URL or blob URL). */
+function getAudioDurationFromUrl(url: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const audio = new Audio();
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => {
+      const d = audio.duration;
+      if (typeof d === 'number' && Number.isFinite(d) && d > 0) resolve(d);
+      else reject(new Error('Could not read audio duration'));
+    };
+    audio.onerror = () => reject(new Error('Could not load audio for duration'));
+    audio.src = url;
+  });
+}
+
+/** Read duration locally from a File (no edge function). */
+function getAudioDurationFromFile(file: File): Promise<number> {
+  const url = URL.createObjectURL(file);
+  return getAudioDurationFromUrl(url).finally(() => URL.revokeObjectURL(url));
+}
+
 const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function RealFootageGenerator(
   {
     userId,
@@ -86,7 +126,15 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
   const [inputMode, setInputMode] = useTabSessionStorage<'document' | 'prompt'>('rf_inputMode', 'document', currentTab);
   const [singlePrompt, setSinglePrompt] = useTabSessionStorage<string>('rf_singlePrompt', '', currentTab);
   const [clipDuration, setClipDuration] = useTabSessionStorage<number>('rf_clipDuration', 5, currentTab);
-  const [totalAudioDuration, setTotalAudioDuration] = useTabSessionStorage<number>('rf_audioDuration', 60, currentTab);
+  const [sliderInputValue, setSliderInputValue] = useState<string>(String(clipDuration));
+  const [selectedAudioPath, setSelectedAudioPath] = useTabSessionStorage<string>('rf_audioPath', '', currentTab);
+  const [totalAudioDuration, setTotalAudioDuration] = useTabSessionStorage<number>('rf_audioDuration', 0, currentTab);
+  const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
+  const [loadingAudioFiles, setLoadingAudioFiles] = useState(false);
+  const [calculatingDuration, setCalculatingDuration] = useState(false);
+  const [audioDurationError, setAudioDurationError] = useState<string | null>(null);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [generationState, setGenerationState] = useState<'idle' | 'generating' | 'complete' | 'error'>('idle');
   const [currentPhase, setCurrentPhase] = useState<'prompts' | 'clips' | 'complete'>('prompts');
@@ -103,9 +151,15 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
   const [singleTaskId, setSingleTaskId] = useState<string | null>(null);
   const [singleDoneLoading, setSingleDoneLoading] = useState(false);
 
+  const [generatedClips, setGeneratedClips] = useState<string[]>([]);
+  const [redoingClip, setRedoingClip] = useState<number | null>(null);
+  const [redoModalBatch, setRedoModalBatch] = useState<number | null>(null);
+  const [showClips, setShowClips] = useState(false);
+
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stoppedRef = useRef(false);
   const phaseRef = useRef<'prompts' | 'clips' | 'complete'>('prompts');
+  const audioUploadRef = useRef<HTMLInputElement>(null);
 
   const isGenerating = generationState === 'generating';
   const isComplete = generationState === 'complete';
@@ -162,10 +216,235 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
   }, [userId]);
 
   useEffect(() => {
-    if (selectedDocument && wordCount > 0 && totalAudioDuration <= 0) {
-      setTotalAudioDuration(Math.max(clipDuration, Math.round(wordCount / WORDS_PER_SECOND)));
+    setSliderInputValue(String(clipDuration));
+  }, [clipDuration]);
+
+  useEffect(() => {
+    const doc = getSelectedDocument();
+    const docGroupId = doc?.group_id;
+    if (!userId || !docGroupId) {
+      setAudioFiles([]);
+      setLoadingAudioFiles(false);
+      return;
     }
-  }, [selectedDocument?.id, wordCount]);
+    setLoadingAudioFiles(true);
+    const load = async () => {
+      try {
+        const { data: audioDocs, error } = await supabase
+          .from('story_documents')
+          .select('id, title, file_path, audio_duration, version')
+          .eq('user_id', userId)
+          .eq('group_id', docGroupId)
+          .in('version', [7, 8, 9, 10])
+          .order('created_at', { ascending: false });
+        if (!error && audioDocs) {
+          setAudioFiles(audioDocs.map(ad => ({
+            path: ad.file_path,
+            name: ad.title || ad.file_path.split('/').pop() || 'Audio File',
+            duration: ad.audio_duration || 0,
+            version: ad.version,
+          })));
+        } else {
+          setAudioFiles([]);
+        }
+      } catch { /* silent */ }
+      finally { setLoadingAudioFiles(false); }
+    };
+    load();
+  }, [userId, selectedDoc, uploadedDocId, documents]);
+
+  const clipDurationOutOfRange = (() => {
+    const parsed = parseInt(sliderInputValue, 10);
+    return sliderInputValue !== '' && (Number.isNaN(parsed) || parsed < RF_CLIP_DURATION_MIN || parsed > RF_CLIP_DURATION_MAX);
+  })();
+
+  const effectiveClipDuration = clampRFClipDuration(clipDuration);
+
+  const renderClipDurationSlider = (disabled: boolean, forDocument = false) => (
+    <div className="space-y-2">
+      <label className="block text-sm text-text-dim mb-2">
+        {forDocument ? 'Default clip length (seconds)' : 'Clip length (seconds)'}
+      </label>
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={RF_CLIP_DURATION_MIN}
+          max={RF_CLIP_DURATION_MAX}
+          step={1}
+          value={effectiveClipDuration}
+          disabled={disabled}
+          onChange={e => {
+            const v = clampRFClipDuration(parseInt(e.target.value, 10));
+            setClipDuration(v);
+            setSliderInputValue(String(v));
+          }}
+          className="flex-1 accent-red-600 disabled:opacity-50"
+        />
+        <input
+          type="number"
+          min={RF_CLIP_DURATION_MIN}
+          max={RF_CLIP_DURATION_MAX}
+          value={sliderInputValue}
+          disabled={disabled}
+          onChange={e => {
+            setSliderInputValue(e.target.value);
+            const v = parseInt(e.target.value, 10);
+            if (!Number.isNaN(v) && v >= RF_CLIP_DURATION_MIN && v <= RF_CLIP_DURATION_MAX) {
+              setClipDuration(v);
+            }
+          }}
+          className="w-16 bg-surface-elevated border border-border-card rounded-xl px-2 py-1 text-sm text-center text-white focus:outline-none focus:border-status-paused [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none disabled:opacity-50"
+        />
+        <span className="text-sm text-text-dim">s</span>
+      </div>
+      {clipDurationOutOfRange && (
+        <div className="flex items-center gap-2 text-xs text-status-warning">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+          <span>Enter a value between {RF_CLIP_DURATION_MIN} and {RF_CLIP_DURATION_MAX} seconds.</span>
+        </div>
+      )}
+      <p className="text-xs text-text-dim">
+        {forDocument
+          ? `AI plans a unique duration (${RF_CLIP_DURATION_MIN}–${RF_CLIP_DURATION_MAX}s) per clip from your audio. Default length guides clip count only.`
+          : `Stock search picks clips closest to this length (${RF_CLIP_DURATION_MIN}–${RF_CLIP_DURATION_MAX}s). Clips are not trimmed.`}
+      </p>
+    </div>
+  );
+
+  const handleCalculateAudioDuration = async (path?: string) => {
+    const targetPath = path ?? selectedAudioPath;
+    if (!targetPath) return;
+    setCalculatingDuration(true);
+    setAudioDurationError(null);
+    try {
+      const picked = audioFiles.find(f => f.path === targetPath);
+      if (picked?.duration && picked.duration > 0) {
+        setTotalAudioDuration(picked.duration);
+        return;
+      }
+
+      const { data, error } = await supabase.storage.from('stories').createSignedUrl(targetPath, 3600);
+      if (error || !data?.signedUrl) {
+        throw new Error(error?.message || 'Could not access audio file in storage');
+      }
+
+      const duration = await getAudioDurationFromUrl(data.signedUrl);
+      setTotalAudioDuration(duration);
+
+      await supabase
+        .from('story_documents')
+        .update({ audio_duration: Math.round(duration), updated_at: new Date().toISOString() })
+        .eq('user_id', userId)
+        .eq('file_path', targetPath);
+
+      setAudioFiles(prev =>
+        prev.map(f => f.path === targetPath ? { ...f, duration: Math.round(duration) } : f),
+      );
+    } catch (err) {
+      setAudioDurationError((err as Error).message || 'Failed to calculate duration');
+    } finally {
+      setCalculatingDuration(false);
+    }
+  };
+
+  const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !userId) return;
+    const docId = selectedDoc || uploadedDocId;
+    const doc = documents.find(d => d.id === docId);
+    const docGroupId = doc?.group_id;
+    if (!docGroupId) return;
+
+    const audioExtensions = ['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.wma'];
+    const fileExt = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '');
+    if (!audioExtensions.includes(fileExt)) {
+      setAudioDurationError(`Unsupported format "${fileExt}". Accepted: ${audioExtensions.join(', ')}`);
+      if (audioUploadRef.current) audioUploadRef.current.value = '';
+      return;
+    }
+    if (file.size > 500 * 1024 * 1024) {
+      setAudioDurationError('File exceeds the 500 MB limit');
+      if (audioUploadRef.current) audioUploadRef.current.value = '';
+      return;
+    }
+
+    setUploadingAudio(true);
+    setUploadProgress(0);
+    setAudioDurationError(null);
+
+    let localDuration = 0;
+    try {
+      localDuration = await getAudioDurationFromFile(file);
+    } catch {
+      /* fall back to edge function after upload */
+    }
+
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const sanitized = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+      const filePath = `documents/${userId}/${docGroupId}/audio_${timestamp}_${sanitized}`;
+
+      const result = await uploadWithTus({
+        file,
+        bucket: 'stories',
+        path: filePath,
+        onProgress: (bytesUploaded, bytesTotal) => {
+          setUploadProgress(Math.round((bytesUploaded / bytesTotal) * 100));
+        },
+        contentType: file.type || 'audio/mpeg',
+      });
+      if (!result.success) throw new Error(result.error || 'Upload failed');
+
+      const { error: insErr } = await supabase.from('story_documents').insert({
+        id: uuidv4(),
+        user_id: userId,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        file_path: filePath,
+        title: sanitized.replace(/\.(mp3|wav|flac|m4a|aac|ogg|wma)$/i, ''),
+        description: 'Uploaded audio file for Real Footage',
+        word_count: 0,
+        version: 7,
+        is_corrected: false,
+        is_prompted: false,
+        group_id: docGroupId,
+        variant: 1,
+        file_size: file.size,
+        audio_duration: localDuration > 0 ? Math.round(localDuration) : null,
+      });
+      if (insErr) throw insErr;
+
+      const { data: audioDocs } = await supabase
+        .from('story_documents')
+        .select('id, title, file_path, audio_duration, version')
+        .eq('user_id', userId)
+        .eq('group_id', docGroupId)
+        .in('version', [7, 8, 9, 10])
+        .order('created_at', { ascending: false });
+      if (audioDocs) {
+        setAudioFiles(audioDocs.map(ad => ({
+          path: ad.file_path,
+          name: ad.title || ad.file_path.split('/').pop() || 'Audio File',
+          duration: ad.audio_duration || 0,
+          version: ad.version,
+        })));
+      }
+
+      setSelectedAudioPath(filePath);
+      if (localDuration > 0) {
+        setTotalAudioDuration(localDuration);
+      } else {
+        setTotalAudioDuration(0);
+        await handleCalculateAudioDuration(filePath);
+      }
+    } catch (err) {
+      setAudioDurationError((err as Error).message || 'Upload failed');
+    } finally {
+      setUploadingAudio(false);
+      setUploadProgress(0);
+      if (audioUploadRef.current) audioUploadRef.current.value = '';
+    }
+  };
 
   const startPolling = (gid: string, v: number) => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -291,6 +570,16 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         setGenerationState('complete');
         setPhaseTwoProgress(100);
         setPhaseOneProgress(100);
+        const { data: promptTasks } = await supabase
+          .from('RF_prompt_tasks')
+          .select('variant')
+          .eq('user_id', userId)
+          .eq('group_id', tab.group_id)
+          .eq('tab', currentTab)
+          .limit(1);
+        const v = promptTasks?.[0]?.variant ?? 1;
+        setVariant(v);
+        await loadGeneratedClips(tab.group_id, v);
         return;
       }
 
@@ -314,6 +603,93 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
     };
     checkResume().catch(() => {});
   }, [userId, currentTab]);
+
+  const loadGeneratedClips = async (gid: string, v?: number) => {
+    if (!userId || !gid) return;
+    try {
+      let query = supabase
+        .from('RF_tasks')
+        .select('batch_number, story_title, video_url, status, redo_status')
+        .eq('user_id', userId)
+        .eq('group_id', gid)
+        .eq('tab', currentTab)
+        .eq('single_rf', false)
+        .in('status', ['completed', 'completed_final'])
+        .order('batch_number', { ascending: true });
+      if (v != null) query = query.eq('variant', v);
+
+      const { data: tasks } = await query;
+      if (!tasks?.length) return;
+
+      const signedUrls = await Promise.all(
+        tasks.map(async (task) => {
+          if (!task.video_url) return '';
+          const { data, error } = await supabase.storage
+            .from('stories')
+            .createSignedUrl(task.video_url, 3600);
+          if (error || !data) {
+            console.error(`[RF] Failed signed URL for batch ${task.batch_number}:`, error);
+            return '';
+          }
+          return data.signedUrl;
+        }),
+      );
+      setGeneratedClips(signedUrls);
+      if (tasks[0].story_title) setGenerationTitle(tasks[0].story_title);
+    } catch (err) {
+      console.error('[RF] loadGeneratedClips error:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (generationState === 'complete' && groupId && inputMode === 'document') {
+      loadGeneratedClips(groupId, variant);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generationState, groupId, variant, inputMode]);
+
+  useEffect(() => {
+    if (!redoingClip || !groupId || !userId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const { data: task } = await supabase
+          .from('RF_tasks')
+          .select('batch_number, video_url, status, redo_status')
+          .eq('user_id', userId)
+          .eq('group_id', groupId)
+          .eq('tab', currentTab)
+          .eq('batch_number', redoingClip)
+          .eq('single_rf', false)
+          .maybeSingle();
+
+        if (!task) return;
+
+        if (!task.redo_status && task.status === 'completed_final' && task.video_url) {
+          const { data: urlData } = await supabase.storage
+            .from('stories')
+            .createSignedUrl(task.video_url, 3600);
+          if (urlData?.signedUrl) {
+            setGeneratedClips(prev => {
+              const next = [...prev];
+              next[redoingClip - 1] = cacheBustSignedUrl(urlData.signedUrl);
+              return next;
+            });
+          }
+          setRedoingClip(null);
+          setStatusMessage('');
+        } else if (task.redo_status === 'failed') {
+          setError(`Redo failed for clip ${redoingClip}`);
+          setRedoingClip(null);
+          setStatusMessage('');
+        }
+      } catch (err) {
+        console.error('[RF] Redo polling error:', err);
+      }
+    }, 10_000);
+
+    return () => clearInterval(interval);
+  }, [redoingClip, groupId, userId, currentTab]);
 
   useEffect(() => {
     if (singleGenState !== 'generating' || !singleTaskId) return;
@@ -380,7 +756,8 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       setUploadedDoc(file);
       setUploadedDocId(doc!.id);
       setDocuments(prev => [doc as StoryDocument, ...prev]);
-      setTotalAudioDuration(Math.max(clipDuration, Math.round(wc / WORDS_PER_SECOND)));
+      setSelectedAudioPath('');
+      setTotalAudioDuration(0);
     } catch (err) {
       setUploadError((err as Error).message || 'Upload failed');
     } finally {
@@ -395,7 +772,11 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       return;
     }
     if (totalAudioDuration <= 0) {
-      setError('Set story runtime (seconds)');
+      setError('Select or upload narration audio and calculate its duration');
+      return;
+    }
+    if (!selectedAudioPath) {
+      setError('Select narration audio for this story');
       return;
     }
 
@@ -416,7 +797,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
         .select('variant')
         .eq('group_id', gid)
         .eq('user_id', userId)
-        .in('version', [12, 13, 14, 15]);
+        .in('version', [28, 29, 30, 31]);
       if (existing?.length) v = Math.max(...existing.map(d => d.variant || 0)) + 1;
       setVariant(v);
       setGenerationTitle(doc.title);
@@ -425,6 +806,14 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
       await updateTabStatus(userId, 'rf', currentTab, 'generating', gid, doc.title);
 
       const { data: { session } } = await supabase.auth.getSession();
+      const selectedAudio = audioFiles.find(f => f.path === selectedAudioPath);
+      const audioPayload: { audio_file_path?: string; audio_folder_path?: string } = {};
+      if (selectedAudio && [9, 10].includes(selectedAudio.version ?? 0)) {
+        audioPayload.audio_folder_path = selectedAudioPath;
+      } else {
+        audioPayload.audio_file_path = selectedAudioPath;
+      }
+
       const res = await fetch(`${import.meta.env.SUPABASE_URL}/functions/v1/setup-RF-prompts`, {
         method: 'POST',
         headers: {
@@ -440,8 +829,9 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           description: doc.description || doc.title,
           style: '',
           video_model: 'stock',
-          video_duration: clipDuration,
+          video_duration: effectiveClipDuration,
           totalAudioDuration,
+          ...audioPayload,
           useCharacterDescriptions: false,
           model: 'sonnet',
           language: 'english',
@@ -492,7 +882,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           story_title: 'single_rf',
           prompt: singlePrompt.trim(),
           style_prompt: '',
-          video_duration: clipDuration,
+          video_duration: effectiveClipDuration,
           tab: currentTab,
         }),
       });
@@ -535,6 +925,66 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
     setSingleDoneLoading(false);
   };
 
+  const handleRedoClip = async (batchNumber: number, feedback = '') => {
+    if (!userId || !groupId) return;
+    setRedoingClip(batchNumber);
+    setStatusMessage(`Redoing clip ${batchNumber}…`);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error('No active session');
+
+      const response = await fetch(`${import.meta.env.SUPABASE_URL}/functions/v1/redo-RF`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: import.meta.env.SUPABASE_PUBLISHABLE_KEY,
+        },
+        body: JSON.stringify({ group_id: groupId, batch_number: batchNumber, feedback }),
+      });
+
+      if (!response.ok && response.status !== 202) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error((errorData as { error?: string }).error || `HTTP ${response.status}`);
+      }
+    } catch (err) {
+      setError(`Failed to redo clip ${batchNumber}: ${(err as Error).message}`);
+      setRedoingClip(null);
+      setStatusMessage('');
+    }
+  };
+
+  const handleDone = async () => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    const doneGroupId = groupId;
+
+    setGenerationState('idle');
+    phaseRef.current = 'prompts';
+    setCurrentPhase('prompts');
+    setPhaseOneProgress(0);
+    setPhaseTwoProgress(0);
+    setStatusMessage('');
+    setError(null);
+    setGroupId(null);
+    setVariant(1);
+    setGenerationTitle(null);
+    setGeneratedClips([]);
+    setRedoingClip(null);
+    setShowClips(false);
+
+    updateTabStatus(userId, 'rf', currentTab, 'idle').catch(() => {});
+
+    try {
+      if (doneGroupId) {
+        await supabase.from('RF_tasks').delete().eq('user_id', userId).eq('group_id', doneGroupId).eq('tab', currentTab);
+        await supabase.from('RF_prompt_tasks').delete().eq('user_id', userId).eq('group_id', doneGroupId).eq('tab', currentTab);
+        await supabase.from('RF_prompt_context').delete().eq('group_id', doneGroupId).eq('tab', currentTab);
+      }
+    } catch (err) {
+      console.error('[RF] Done cleanup error:', err);
+    }
+  };
+
   const handleReset = () => {
     stoppedRef.current = true;
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -546,11 +996,21 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
     setStatusMessage('');
     setGroupId(null);
     setGenerationTitle(null);
+    setGeneratedClips([]);
+    setRedoingClip(null);
+    setShowClips(false);
     updateTabStatus(userId, 'rf', currentTab, 'idle').catch(() => {});
   };
 
   const canGenerateDocument =
-    !!selectedDocument && totalAudioDuration > 0 && !isGenerating && !isComplete;
+    !!selectedDocument
+    && !!selectedAudioPath
+    && totalAudioDuration > 0
+    && !clipDurationOutOfRange
+    && !isGenerating
+    && !isComplete
+    && !calculatingDuration
+    && !uploadingAudio;
 
   const configCollapsed =
     isGenerating || isComplete || singleGenState === 'generating' || singleGenState === 'complete';
@@ -576,12 +1036,12 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           <h3 className="text-xl font-semibold mb-2 text-accent">What to Expect</h3>
           <p className="text-[15px] text-white/80 leading-relaxed">
             Real Footage takes your story (or a single search prompt) and finds matching stock clips.
-            Claude generates search keywords per scene, then the system downloads and saves clips to your Documents folder as RF Outputs.
+            Claude generates search keywords per scene, then the system downloads and saves clips to your Documents folder as Real Footage Clips.
           </p>
           <div className="mt-4 pt-4 border-t border-white/10">
             <p className="text-sm text-text-muted leading-relaxed">
               Choose <strong className="text-white/90">Existing Document</strong> for a full story run, or <strong className="text-white/90">Individual Prompt</strong> for one stock clip.
-              Set clip timing, then generate. Clips appear under Documents as RF Outputs.
+              Set clip timing, then generate. Clips appear under Documents as Real Footage Clips.
             </p>
           </div>
         </div>
@@ -623,7 +1083,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           <StatusBanner
             variant="success"
             title={<>Stock Clips Ready{generationTitle ? ` — ${generationTitle}` : ''}</>}
-            subtitle="Clips are saved in Documents under RF Outputs. You can download the folder from Your Documents."
+            subtitle="Clips are saved in Documents under Real Footage Clips. You can download the folder from Your Documents."
           />
         )}
 
@@ -675,7 +1135,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
                 <DocumentSelector
                   documents={documents}
                   selectedDoc={selectedDoc || uploadedDocId || ''}
-                  onDocChange={(id) => { setSelectedDoc(id); setUploadedDoc(null); setUploadedDocId(null); }}
+                  onDocChange={(id) => { setSelectedDoc(id); setUploadedDoc(null); setUploadedDocId(null); setSelectedAudioPath(''); setTotalAudioDuration(0); }}
                   uploadedDoc={uploadedDoc}
                   onUploadedDocChange={(f) => { setUploadedDoc(f); if (!f) setUploadedDocId(null); }}
                   onFileUpload={handleFileUpload}
@@ -725,37 +1185,172 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
               <div>
                 <label className="block text-[10px] font-mono tracking-[0.15em] text-text-label uppercase mb-4">Generation Settings</label>
                 <div className="space-y-4 p-5 rounded-2xl bg-surface-card border border-border-card">
-                  <div>
-                    <label className="block text-sm text-text-dim mb-2">Clip length (seconds)</label>
-                    <div className="flex flex-wrap gap-2">
-                      {CLIP_DURATIONS.map(d => (
-                        <button
-                          key={d}
-                          type="button"
-                          onClick={() => setClipDuration(d)}
-                          disabled={isGenerating}
-                          className={`px-4 py-2 rounded-xl border text-sm font-medium transition-colors ${
-                            clipDuration === d
-                              ? 'border-red-800/70 bg-red-900/30 text-white'
-                              : 'border-border bg-surface-elevated text-text-muted hover:border-border-subtle'
-                          }`}
-                        >
-                          {d}s
-                        </button>
-                      ))}
+                  {renderClipDurationSlider(isGenerating, true)}
+
+                  <div className="border-t border-border pt-4 space-y-4">
+                    <label className="block text-[10px] font-mono tracking-[0.15em] text-text-label uppercase mb-1">Narration Audio</label>
+                    <div className="bg-[--color-status-info-bg] border border-[--color-status-info-border] rounded-xl p-3 flex gap-2">
+                      {calculatingDuration ? (
+                        <>
+                          <RefreshCw className="w-5 h-5 text-status-info flex-shrink-0 mt-0.5 animate-spin" />
+                          <div className="text-sm text-status-info">
+                            <strong>Calculating audio duration…</strong> Please wait.
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <Info className="w-5 h-5 text-status-info flex-shrink-0 mt-0.5" />
+                          <div className="text-sm text-status-info">
+                            <strong>Audio required.</strong> Clip count and per-clip timing come from your narration audio.
+                          </div>
+                        </>
+                      )}
                     </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm text-text-dim mb-2">Story runtime (seconds)</label>
-                    <input
-                      type="number"
-                      min={clipDuration}
-                      value={totalAudioDuration}
-                      onChange={e => setTotalAudioDuration(Math.max(clipDuration, Number(e.target.value)))}
-                      disabled={isGenerating}
-                      className="w-full max-w-xs bg-surface-elevated border border-border-card rounded-xl px-3 py-2 text-white"
-                    />
-                    <p className="text-xs text-text-dim mt-2">~{estimatedClips} clips at {clipDuration}s each</p>
+
+                    {!selectedDocument ? (
+                      <div className="bg-status-warning border border-status-warning rounded-xl p-3 flex gap-2">
+                        <AlertCircle className="w-5 h-5 text-status-warning flex-shrink-0 mt-0.5" />
+                        <div className="text-sm text-status-warning-text">
+                          <strong>Story required:</strong> Select or upload a story document first.
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <label className="block text-sm text-text-dim">Select existing audio</label>
+                          {loadingAudioFiles ? (
+                            <div className="flex items-center gap-2 text-sm text-text-dim p-3 bg-surface-elevated rounded-xl">
+                              <RefreshCw className="h-4 w-4 animate-spin" />
+                              Loading audio files…
+                            </div>
+                          ) : (
+                            <Listbox
+                              value={selectedAudioPath}
+                              onChange={(value) => {
+                                setSelectedAudioPath(value);
+                                setAudioDurationError(null);
+                                if (!value) {
+                                  setTotalAudioDuration(0);
+                                  return;
+                                }
+                                const picked = audioFiles.find(f => f.path === value);
+                                if (picked?.duration && picked.duration > 0) {
+                                  setTotalAudioDuration(picked.duration);
+                                } else {
+                                  setTotalAudioDuration(0);
+                                  handleCalculateAudioDuration(value);
+                                }
+                              }}
+                              disabled={calculatingDuration || uploadingAudio || isGenerating}
+                            >
+                              {({ open }) => (
+                                <div className="relative">
+                                  <Listbox.Button className={`relative w-full bg-surface-input border border-white/[0.13] rounded-xl px-5 py-4 text-left text-white focus:outline-none focus:ring-2 focus:ring-red-900/60 focus:border-red-800/50 transition-all duration-200 ${calculatingDuration ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-surface-input'}`}>
+                                    <span className="block truncate">
+                                      {selectedAudioPath
+                                        ? audioFiles.find(f => f.path === selectedAudioPath)?.name
+                                        : <span className="italic text-text-dim">None – upload new audio</span>}
+                                    </span>
+                                    <span className="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
+                                      <ChevronDown className={`h-5 w-5 text-white/50 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                                    </span>
+                                  </Listbox.Button>
+                                  <Transition
+                                    show={open}
+                                    enter="transition ease-out duration-100"
+                                    enterFrom="transform opacity-0 scale-95"
+                                    enterTo="transform opacity-100 scale-100"
+                                    leave="transition ease-in duration-75"
+                                    leaveFrom="transform opacity-100 scale-100"
+                                    leaveTo="transform opacity-0 scale-95"
+                                  >
+                                    <Listbox.Options className="absolute z-10 mt-2 w-full bg-surface-dropdown border border-white/[0.11] rounded-xl shadow-lg max-h-60 overflow-auto focus:outline-none">
+                                      <Listbox.Option
+                                        value=""
+                                        className={({ active }) =>
+                                          `relative cursor-pointer select-none py-3 px-4 ${active ? 'bg-white/[0.08] text-white' : 'text-text-secondary'}`
+                                        }
+                                      >
+                                        <span className="italic text-sm text-text-dim">None – upload new audio</span>
+                                      </Listbox.Option>
+                                      {audioFiles.map(af => (
+                                        <Listbox.Option
+                                          key={af.path}
+                                          value={af.path}
+                                          className={({ active, selected }) =>
+                                            `relative cursor-pointer select-none py-3 px-4 flex justify-between items-center ${active ? 'bg-white/[0.08] text-white' : 'text-text-secondary'} ${selected ? 'font-medium' : ''}`
+                                          }
+                                        >
+                                          {({ selected }) => (
+                                            <>
+                                              <span className={selected ? 'text-white font-medium' : ''}>{af.name}</span>
+                                              {selected && <CheckCircle2 className="h-5 w-5 text-accent-text" />}
+                                            </>
+                                          )}
+                                        </Listbox.Option>
+                                      ))}
+                                    </Listbox.Options>
+                                  </Transition>
+                                </div>
+                              )}
+                            </Listbox>
+                          )}
+                          {audioDurationError && (
+                            <p className="text-xs text-status-error">{audioDurationError}</p>
+                          )}
+                        </div>
+
+                        {!selectedAudioPath && (
+                          <div className="space-y-2">
+                            <label className="block text-sm text-text-dim">Upload new audio</label>
+                            <label className={`flex flex-col items-center justify-center w-full h-28 border-2 border-dashed rounded-xl transition-colors ${uploadingAudio || calculatingDuration ? 'border-white/[0.13] bg-surface-input cursor-not-allowed opacity-60' : 'border-white/[0.13] bg-surface-input hover:bg-surface-input/80 hover:border-white/[0.2] cursor-pointer'}`}>
+                              <div className="flex flex-col items-center justify-center py-4 text-center w-full px-4">
+                                {uploadingAudio ? (
+                                  <>
+                                    <RefreshCw className="h-5 w-5 text-status-info animate-spin mb-2" />
+                                    <p className="text-sm text-text-dim mb-2">Uploading… {uploadProgress > 0 ? `${uploadProgress}%` : ''}</p>
+                                    {uploadProgress > 0 && (
+                                      <div className="w-full bg-surface-elevated rounded-full h-1.5">
+                                        <div className="bg-status-info-muted h-1.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+                                      </div>
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    <p className="text-sm text-text-dim">
+                                      <span className="font-medium text-text-muted">Click to upload</span> or drag and drop
+                                    </p>
+                                    <p className="text-xs text-text-dim mt-1">MP3, WAV, M4A, FLAC, AAC, OGG (max 500 MB)</p>
+                                  </>
+                                )}
+                              </div>
+                              <input
+                                ref={audioUploadRef}
+                                type="file"
+                                accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.wma,audio/*"
+                                className="hidden"
+                                disabled={uploadingAudio || calculatingDuration || isGenerating}
+                                onChange={handleAudioUpload}
+                              />
+                            </label>
+                          </div>
+                        )}
+
+                        {totalAudioDuration > 0 && (
+                          <div className="space-y-2 border-t border-border pt-3">
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-text-dim">Audio duration</span>
+                              <span className="text-white">{formatDuration(totalAudioDuration)}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-text-dim">Estimated clips</span>
+                              <span className="text-white font-semibold">{estimatedClips}</span>
+                            </div>
+                            <p className="text-xs text-text-dim">AI assigns a unique duration per clip during prompt generation.</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -765,22 +1360,7 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
               <div>
                 <label className="block text-[10px] font-mono tracking-[0.15em] text-text-label uppercase mb-4">Clip Settings</label>
                 <div className="p-5 rounded-2xl bg-surface-card border border-border-card">
-                  <label className="block text-sm text-text-dim mb-2">Target clip length (seconds)</label>
-                  <div className="flex flex-wrap gap-2">
-                    {CLIP_DURATIONS.map(d => (
-                      <button
-                        key={d}
-                        type="button"
-                        onClick={() => setClipDuration(d)}
-                        disabled={singleGenState !== 'idle'}
-                        className={`px-4 py-2 rounded-xl border text-sm font-medium ${
-                          clipDuration === d ? 'border-red-800/70 bg-red-900/30 text-white' : 'border-border bg-surface-elevated text-text-muted'
-                        }`}
-                      >
-                        {d}s
-                      </button>
-                    ))}
-                  </div>
+                  {renderClipDurationSlider(singleGenState !== 'idle')}
                 </div>
               </div>
             )}
@@ -836,12 +1416,12 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
               Generate Real Footage
             </button>
             {!canGenerateDocument && (
-              <p className="text-xs text-text-dim text-center">Select a document and runtime to enable generation.</p>
+              <p className="text-xs text-text-dim text-center">Select a story document, narration audio, and clip settings to enable generation.</p>
             )}
           </div>
         )}
 
-        {inputMode === 'document' && (isComplete || generationState === 'error') && (
+        {inputMode === 'document' && generationState === 'error' && (
           <div className="flex justify-center gap-3 pb-8 mt-4">
             <button type="button" onClick={handleReset} className="px-6 py-3 border border-border rounded-xl text-text-secondary hover:bg-surface-card">
               Start over
@@ -852,12 +1432,148 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           </div>
         )}
 
+        {inputMode === 'document' && isComplete && (
+          <div className="mb-6 bg-surface-card rounded-xl border border-status-success p-6 mt-4">
+            <div className="flex items-center gap-3 mb-5">
+              <CheckCircle2 className="h-6 w-6 text-status-success shrink-0" />
+              <div>
+                <h2 className="text-lg font-semibold text-status-success">
+                  Stock Clips Ready{generationTitle ? ` — ${generationTitle}` : ''}
+                </h2>
+                <p className="text-sm text-text-dim mt-0.5">
+                  {generatedClips.length} clip{generatedClips.length !== 1 ? 's' : ''} saved to your Documents
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-3 mb-6 pb-5 border-b border-border">
+              <button
+                type="button"
+                onClick={handleDone}
+                className="flex items-center gap-2 px-4 py-2 bg-surface-elevated hover:bg-surface-elevated text-text-muted rounded-xl text-sm transition-colors"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Done
+              </button>
+              <Link
+                to="/documents"
+                className="flex items-center gap-2 px-4 py-2 bg-action-success-hover hover:bg-action-success text-white rounded-xl text-sm transition-colors"
+              >
+                <Folder className="h-4 w-4" />
+                View in Documents
+              </Link>
+            </div>
+
+            {redoingClip && statusMessage && (
+              <p className="text-sm text-status-warning-text mb-4">{statusMessage}</p>
+            )}
+
+            {generatedClips.length > 0 && (
+              showClips || redoingClip !== null ? (
+                <div className="flex flex-col gap-6">
+                  {generatedClips.map((clipUrl, index) => {
+                    const batchNum = index + 1;
+                    const isRedoing = redoingClip === batchNum;
+                    return (
+                      <div key={batchNum} className="bg-surface-elevated rounded-xl overflow-hidden border border-border">
+                        <div className="px-4 py-2 flex items-center justify-between border-b border-border">
+                          <span className="text-sm font-medium text-text-muted">Clip {batchNum}</span>
+                          <div className="flex items-center gap-2">
+                            {clipUrl && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    const res = await fetch(clipUrl);
+                                    const blob = await res.blob();
+                                    const objUrl = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = objUrl;
+                                    a.download = `clip-${batchNum}.mp4`;
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    document.body.removeChild(a);
+                                    URL.revokeObjectURL(objUrl);
+                                  } catch {
+                                    window.open(clipUrl, '_blank');
+                                  }
+                                }}
+                                className="flex items-center gap-1 px-2 py-1 bg-surface-elevated hover:bg-action-info-hover text-text-muted hover:text-white rounded text-xs transition-colors"
+                              >
+                                <Download className="h-3 w-3" />
+                                Download
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setRedoModalBatch(batchNum)}
+                              disabled={redoingClip !== null}
+                              className="flex items-center gap-1 px-2 py-1 bg-surface-elevated hover:bg-accent-hover text-text-muted hover:text-white rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                              Redo
+                            </button>
+                          </div>
+                        </div>
+                        <div className="aspect-video relative bg-surface-primary">
+                          {clipUrl ? (
+                            <video
+                              key={clipUrl}
+                              src={clipUrl}
+                              controls
+                              className="w-full h-full object-contain"
+                              preload="metadata"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <RefreshCw className="h-6 w-6 text-text-dim animate-spin" />
+                            </div>
+                          )}
+                          {isRedoing && (
+                            <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2">
+                              <RefreshCw className="h-8 w-8 text-status-error animate-spin" />
+                              <span className="text-white text-sm font-medium">Re-fetching stock clip…</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-8 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowClips(true)}
+                    className="flex items-center gap-2 px-6 py-3 bg-red-900/80 hover:bg-red-800 text-white rounded-xl transition-colors font-medium"
+                  >
+                    <Play className="h-5 w-5" />
+                    Show {generatedClips.length} Clip{generatedClips.length !== 1 ? 's' : ''}
+                  </button>
+                  <p className="text-xs text-text-dim">Click to preview clips in the browser</p>
+                </div>
+              )
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-3 mt-6 pt-5 border-t border-border">
+              <button
+                type="button"
+                onClick={handleDone}
+                className="flex items-center gap-2 px-4 py-2 bg-surface-elevated hover:bg-surface-elevated text-text-muted rounded-xl text-sm transition-colors"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
         {inputMode === 'prompt' && singleGenState !== 'generating' && singleGenState !== 'complete' && (
           <div className="bg-surface-card rounded-xl p-6 mt-6">
             <button
               type="button"
               onClick={handleGenerateSingle}
-              disabled={!singlePrompt.trim()}
+              disabled={!singlePrompt.trim() || clipDurationOutOfRange}
               className="w-full flex justify-center items-center gap-2 px-4 py-3 bg-accent text-white rounded-xl hover:bg-accent-hover disabled:opacity-50"
             >
               <Film className="w-5 h-5" />
@@ -917,13 +1633,17 @@ const RealFootageGenerator = forwardRef<RealFootageGeneratorRef, Props>(function
           </div>
         )}
 
-        {groupId && inputMode === 'document' && (
-          <p className="text-xs text-text-dim mt-4 pb-8">
-            Group ID: {groupId}
-            {variant > 1 ? ` · variant ${variant}` : ''}
-          </p>
-        )}
       </div>
+      <RedoFeedbackModal
+        open={redoModalBatch != null}
+        title={`Redo Clip ${redoModalBatch ?? ''}`}
+        onCancel={() => setRedoModalBatch(null)}
+        onConfirm={(fb) => {
+          const b = redoModalBatch;
+          setRedoModalBatch(null);
+          if (b != null) handleRedoClip(b, fb);
+        }}
+      />
     </DashboardLayout>
   );
 });

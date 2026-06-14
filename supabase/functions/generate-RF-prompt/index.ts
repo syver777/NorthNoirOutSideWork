@@ -2,6 +2,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { verifyAuth } from '../_shared/utils.ts';
 import { getIsLegacyPlan, llmMultiplier } from '../_shared/tokenCosts.ts';
 import { getCorsHeaders } from '../_shared/cors.ts';
+import { clampRFClipDuration, RF_CLIP_DURATION_MIN, RF_CLIP_DURATION_MAX } from '../_shared/rfClipDuration.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseKey = (Deno.env.get('PUBLIC_KEY')) ?? '';
@@ -131,6 +132,7 @@ interface RequestBody {
 interface PromptResult {
   text: string;
   prompt: string;
+  video_duration: number;
   characters_mentioned?: string[];
 }
 
@@ -376,6 +378,7 @@ function getSystemPrompt(
   previousPrompts: string[],
   masterPromptData?: Record<string, any> | null,
   audioClip: boolean = false,
+  totalAudioSeconds: number = 0,
 ): string {
   // Master Prompt overrides: characters and environment_only
   const effectiveCharacters: Record<string, string> =
@@ -414,11 +417,15 @@ ${previousPrompts.length > 0 ? `Previous Video Prompts (use for visual consisten
 ${previousPrompts.slice(-5).map((p, i) => `${i + 1}. ${p.slice(0, 200)}...`).join('\n')}
 ` : ''}`;
 
+  const audioDurationBlock = totalAudioSeconds > 0
+    ? `\nTotal narration audio: ${Math.round(totalAudioSeconds)} seconds. For each segment assign "video_duration" (integer ${RF_CLIP_DURATION_MIN}–${RF_CLIP_DURATION_MAX}) — how long the stock clip should be. Denser or longer segments get longer clips; quick transitions get shorter clips. Across the full story, durations should sum to roughly ${Math.round(totalAudioSeconds)}s.\n`
+    : '';
+
   const prompts: Record<string, string> = {
     english: `You help find real stock footage on Coverr and Pexels. For each story segment, output a short stock-video SEARCH QUERY (not a cinematic AI prompt).
 
 CRITICAL: Exactly ONE search query per segment. Do NOT split or merge segments.
-
+${audioDurationBlock}
 Rules for "prompt" (the search query field):
 - 3–12 words, concrete and visual (subjects, actions, setting, mood)
 - Suitable for stock video sites (e.g. "woman walking city street rain", "aerial forest morning mist")
@@ -427,7 +434,7 @@ Rules for "prompt" (the search query field):
 ${effectiveEnvironmentOnly ? '- Prefer environment/landscape shots with minimal people.' : ''}
 
 Output a JSON array with exactly the same number of items as input segments.
-Each item: "text" (exact copy of segment text), "prompt" (stock search query string)${schemaInstruction}.
+Each item: "text" (exact copy of segment text), "prompt" (stock search query string), "video_duration" (integer ${RF_CLIP_DURATION_MIN}–${RF_CLIP_DURATION_MAX})${schemaInstruction}.
 Return only the JSON array.
 
 ${contextSection}`,
@@ -589,6 +596,10 @@ Deno.serve(async (req: Request) => {
     const validatedModel = 'sonnet';
     const validatedLanguage = ['english', 'german', 'spanish', 'french'].includes(language ?? '') ? language! : 'english';
 
+    const totalAudioSeconds = Number(fullContext?.total_audio_duration) > 0
+      ? Number(fullContext.total_audio_duration)
+      : 0;
+
     const systemPrompt = getSystemPrompt(
       validatedLanguage,
       fullContext?.style_description ?? settings.style,
@@ -598,9 +609,17 @@ Deno.serve(async (req: Request) => {
       previousPrompts,
       fullContext?.master_prompt_data ?? null,
       audio_clip,
+      totalAudioSeconds,
     );
 
-    let userPrompt = `Process these ${normalizedSegments.length} segment(s). For EACH segment, copy "text" EXACTLY and generate ONE stock-footage search query in "prompt":\n\n`;
+    let userPrompt = `Process these ${normalizedSegments.length} segment(s). For EACH segment, copy "text" EXACTLY, generate ONE stock-footage search query in "prompt", and assign "video_duration" (${RF_CLIP_DURATION_MIN}–${RF_CLIP_DURATION_MAX} seconds):\n\n`;
+    if (totalAudioSeconds > 0) {
+      userPrompt += `Total narration audio: ${Math.round(totalAudioSeconds)} seconds.\n\n`;
+    }
+
+    const mapResultDuration = (raw: unknown, fallback: number): number =>
+      clampRFClipDuration(typeof raw === 'number' && raw > 0 ? raw : fallback);
+
     normalizedSegments.forEach((seg, idx) => {
       userPrompt += `Segment ${idx + 1} (${seg.text.length} chars, ~${seg.video_duration}s clip):\nText: ${seg.text}\n\n`;
     });
@@ -651,11 +670,12 @@ Return EXACTLY ${normalizedSegments.length} result(s) in the JSON array.`;
             // Merge characters_mentioned from all parsed results
             const allMentioned = parsed.flatMap((r: any) => Array.isArray(r.characters_mentioned) ? r.characters_mentioned : []);
             const uniqueMentioned = [...new Set(allMentioned)];
-            results = [{ text: normalizedSegments[0].text, prompt: combined.substring(0, 600), characters_mentioned: uniqueMentioned.length > 0 ? uniqueMentioned : undefined }];
+            results = [{ text: normalizedSegments[0].text, prompt: combined.substring(0, 600), video_duration: mapResultDuration(parsed[0]?.video_duration, normalizedSegments[0].video_duration), characters_mentioned: uniqueMentioned.length > 0 ? uniqueMentioned : undefined }];
           } else {
             results = normalizedSegments.map((seg, i) => ({
               text: seg.text,
               prompt: parsed[i]?.prompt ?? '',
+              video_duration: mapResultDuration(parsed[i]?.video_duration, seg.video_duration),
               characters_mentioned: Array.isArray(parsed[i]?.characters_mentioned) ? parsed[i].characters_mentioned : undefined,
             }));
           }
@@ -669,6 +689,7 @@ Return EXACTLY ${normalizedSegments.length} result(s) in the JSON array.`;
         results = parsed.map((r: any, i: number) => ({
           text: r.text ?? normalizedSegments[i].text,
           prompt: r.prompt ?? '',
+          video_duration: mapResultDuration(r.video_duration, normalizedSegments[i]?.video_duration ?? settings.video_duration),
           characters_mentioned: Array.isArray(r.characters_mentioned) ? r.characters_mentioned : undefined,
         }));
         break;

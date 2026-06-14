@@ -8,6 +8,23 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { getStorageLimitFormatted, getStorageLimitMB } from '../utils/storageHelpers';
 import { sanitizeFileName } from '../utils/videoGeneratorUtils';
+import {
+  RF_CLIP_VERSION_CORRECTED,
+  RF_CLIP_VERSION_ORIGINAL,
+  RF_PROMPT_VERSION_CORRECTED,
+  RF_PROMPT_VERSION_ORIGINAL,
+  isRFClipVersion,
+} from '../constants/rfVersions';
+
+function isVideoClipFolderVersion(version: number): boolean {
+  return version === 14 || version === 15 || version === 22 || version === 23
+    || version === 26 || version === 27 || isRFClipVersion(version);
+}
+
+function isMp4ZipFolderVersion(version: number): boolean {
+  return version === 14 || version === 15 || version === 22 || version === 23
+    || version === 26 || version === 27 || isRFClipVersion(version);
+}
 
 const supabase = createClient(
   import.meta.env.SUPABASE_URL,
@@ -37,7 +54,7 @@ interface GroupedDocuments {
   };
 }
 
-type DeleteScenario = 'simple-delete' | 'story-generator-only' | 'video-completed' | 'video-active' | 'image-prompts-only' | 'image-generator-completed' | 'image-generator-active' | 'image-folder-completed' | 'image-folder-active' | 'audio-tts-completed' | 'audio-tts-active' | 'video-file-completed' | 'ttv-prompts-completed' | 'ttv-prompts-active' | 'ttv-folder-completed' | 'ttv-folder-active' | 'itv-image-prompts-completed' | 'itv-image-prompts-active' | 'itv-image-folder-completed' | 'itv-image-folder-active' | 'itv-video-prompts-completed' | 'itv-video-prompts-active' | 'itv-folder-completed' | 'itv-folder-active';
+type DeleteScenario = 'simple-delete' | 'story-generator-only' | 'video-completed' | 'video-active' | 'image-prompts-only' | 'image-generator-completed' | 'image-generator-active' | 'image-folder-completed' | 'image-folder-active' | 'audio-tts-completed' | 'audio-tts-active' | 'video-file-completed' | 'ttv-prompts-completed' | 'ttv-prompts-active' | 'ttv-folder-completed' | 'ttv-folder-active' | 'rf-prompts-completed' | 'rf-prompts-active' | 'rf-folder-completed' | 'rf-folder-active' | 'itv-image-prompts-completed' | 'itv-image-prompts-active' | 'itv-image-folder-completed' | 'itv-image-folder-active' | 'itv-video-prompts-completed' | 'itv-video-prompts-active' | 'itv-folder-completed' | 'itv-folder-active';
 
 interface VideoTaskStatus {
   id: string;
@@ -1309,14 +1326,82 @@ export default function Documents() {
           .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
         await supabase.from('ITV_prompt_context').delete()
           .eq('group_id', groupId).eq('tab', tab);
+
+      } else if (scenario === 'rf-prompts-completed') {
+        await supabase.from('RF_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_context').delete()
+          .eq('group_id', groupId).eq('tab', tab);
+        const { resetRFTabToDefaults } = await import('../utils/tabManager');
+        await resetRFTabToDefaults(userId, tab);
+
+      } else if (scenario === 'rf-prompts-active') {
+        await supabase.from('RF_prompt_tasks').update({ stop_requested: true })
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_tasks').update({ stop_requested: true })
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        try {
+          const { data: rfTasks } = await supabase.from('RF_tasks')
+            .select('story_title, folder_timestamp')
+            .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+          if (rfTasks && rfTasks.length > 0) {
+            const taskWithTimestamp = rfTasks.find((t: any) => t.story_title && t.folder_timestamp);
+            if (taskWithTimestamp) {
+              const cleanTitle = (taskWithTimestamp.story_title || '')
+                .replace(/^RF Prompt:\s*/i, '')
+                .replace(/^RF Prompts:\s*/i, '');
+              const sanitizedForPath = cleanTitle.replace(/[^a-zA-Z0-9\s-]/g, '.').toLowerCase().trim().replace(/\s+/g, '-');
+              const folderPath = `documents/${userId}/${groupId}/RF-${sanitizedForPath}_${taskWithTimestamp.folder_timestamp}`;
+              const { data: files } = await supabase.storage.from('stories').list(folderPath);
+              if (files && files.length > 0) {
+                await supabase.storage.from('stories').remove(files.map((f: any) => `${folderPath}/${f.name}`));
+              }
+            }
+          }
+        } catch (e) { console.warn('Failed to clean up in-progress RF clip files:', e); }
+        await supabase.from('RF_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_context').delete()
+          .eq('group_id', groupId).eq('tab', tab);
+        const { resetRFTabToDefaults: resetRF2 } = await import('../utils/tabManager');
+        await resetRF2(userId, tab);
+
+      } else if (scenario === 'rf-folder-completed') {
+        await supabase.from('RF_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_context').delete()
+          .eq('group_id', groupId).eq('tab', tab);
+        const { resetRFTabToDefaults: resetRF3 } = await import('../utils/tabManager');
+        await resetRF3(userId, tab);
+
+      } else if (scenario === 'rf-folder-active') {
+        await supabase.from('RF_prompt_tasks').update({ stop_requested: true })
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_tasks').update({ stop_requested: true })
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_tasks').delete()
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        await supabase.from('RF_prompt_context').delete()
+          .eq('group_id', groupId).eq('tab', tab);
+        const { resetRFTabToDefaults: resetRF4 } = await import('../utils/tabManager');
+        await resetRF4(userId, tab);
       }
 
       // Close modal before performing the final file + DB row deletion
       setDeleteConfirmModal(null);
-      // isFolder covers image folders (v5/v6), audio folders (v9/v10), TTV video folders (v14/v15),
-      // ITV image folders (v18/v19), ITV video folders (v22/v23), and MG video folders (v26/v27)
+      // isFolder covers image folders (v5/v6), audio folders (v9/v10), TTV/ITV/MG/RF video folders
       // isVideo covers ONLY the compiled final video (v11) — all folder types are in the 'stories' bucket
-      const isFolder = doc.version === 5 || doc.version === 6 || doc.version === 9 || doc.version === 10 || doc.version === 14 || doc.version === 15 || doc.version === 18 || doc.version === 19 || doc.version === 22 || doc.version === 23 || doc.version === 26 || doc.version === 27;
+      const isFolder = doc.version === 5 || doc.version === 6 || doc.version === 9 || doc.version === 10
+        || isVideoClipFolderVersion(doc.version || 0)
+        || doc.version === 18 || doc.version === 19;
       const isVideo = doc.version === 11;
       await handleDelete(doc.id, doc.file_path, isFolder, isVideo);
 
@@ -1662,6 +1747,106 @@ export default function Documents() {
       }
     } catch (err: any) {
       console.error('Error checking TTV folder delete status:', err);
+      await handleDelete(doc.id, doc.file_path, true, true);
+    } finally {
+      setCheckingDelete(prev => ({ ...prev, [doc.id]: false }));
+    }
+  };
+
+  const handleRFPromptDeleteClick = async (doc: StoryDocument) => {
+    try {
+      setCheckingDelete(prev => ({ ...prev, [doc.id]: true }));
+
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) {
+        setError('Authentication error');
+        return;
+      }
+
+      const groupId = doc.group_id || doc.id;
+      const tab = doc.tab ?? 1;
+
+      const { data: promptTasks, error: promptTasksError } = await supabase
+        .from('RF_prompt_tasks')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('group_id', groupId)
+        .eq('tab', tab);
+
+      if (promptTasksError || !promptTasks || promptTasks.length === 0) {
+        setDeleteConfirmModal({ doc, userId: user.id, groupId, tab, scenario: 'simple-delete' });
+        return;
+      }
+
+      const { data: rfTasks, error: rfTasksError } = await supabase
+        .from('RF_tasks')
+        .select('id, status')
+        .eq('user_id', user.id)
+        .eq('group_id', groupId)
+        .eq('tab', tab);
+
+      if (rfTasksError || !rfTasks || rfTasks.length === 0) {
+        setDeleteConfirmModal({ doc, userId: user.id, groupId, tab, scenario: 'rf-prompts-completed' });
+        return;
+      }
+
+      const allCompleted = rfTasks.every((t: any) => t.status === 'completed_final');
+      setDeleteConfirmModal({
+        doc,
+        userId: user.id,
+        groupId,
+        tab,
+        scenario: allCompleted ? 'rf-prompts-completed' : 'rf-prompts-active',
+      });
+    } catch (err: any) {
+      console.error('Error checking RF prompt delete status:', err);
+      await handleDelete(doc.id, doc.file_path, false, false);
+    } finally {
+      setCheckingDelete(prev => ({ ...prev, [doc.id]: false }));
+    }
+  };
+
+  const handleRFFolderDeleteClick = async (doc: StoryDocument) => {
+    try {
+      setCheckingDelete(prev => ({ ...prev, [doc.id]: true }));
+
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) {
+        setError('Authentication error');
+        return;
+      }
+
+      const groupId = doc.group_id || doc.id;
+      const tab = doc.tab ?? 1;
+
+      const { data: rfTasks, error: rfTasksError } = await supabase
+        .from('RF_tasks')
+        .select('id, status')
+        .eq('user_id', user.id)
+        .eq('group_id', groupId)
+        .eq('tab', tab);
+
+      if (rfTasksError) {
+        console.error('Error checking RF_tasks:', rfTasksError);
+        await handleDelete(doc.id, doc.file_path, true, true);
+        return;
+      }
+
+      if (!rfTasks || rfTasks.length === 0) {
+        setDeleteConfirmModal({ doc, userId: user.id, groupId, tab, scenario: 'simple-delete' });
+        return;
+      }
+
+      const allCompleted = rfTasks.every((t: any) => t.status === 'completed_final');
+      setDeleteConfirmModal({
+        doc,
+        userId: user.id,
+        groupId,
+        tab,
+        scenario: allCompleted ? 'rf-folder-completed' : 'rf-folder-active',
+      });
+    } catch (err: any) {
+      console.error('Error checking RF folder delete status:', err);
       await handleDelete(doc.id, doc.file_path, true, true);
     } finally {
       setCheckingDelete(prev => ({ ...prev, [doc.id]: false }));
@@ -2271,6 +2456,30 @@ export default function Documents() {
         return { ...base, scenario: allCompleted ? 'itv-folder-completed' : 'itv-folder-active' };
       }
 
+      // RF prompts (v28, v29)
+      if (v === RF_PROMPT_VERSION_ORIGINAL || v === RF_PROMPT_VERSION_CORRECTED) {
+        const { data: promptTasks } = await supabase.from('RF_prompt_tasks')
+          .select('id')
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        if (!promptTasks || promptTasks.length === 0) return { ...base, scenario: 'simple-delete' };
+        const { data: rfTasks } = await supabase.from('RF_tasks')
+          .select('id, status')
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        if (!rfTasks || rfTasks.length === 0) return { ...base, scenario: 'rf-prompts-completed' };
+        const allCompleted = rfTasks.every((t: any) => t.status === 'completed_final');
+        return { ...base, scenario: allCompleted ? 'rf-prompts-completed' : 'rf-prompts-active' };
+      }
+
+      // RF clip folders (v30, v31)
+      if (v === RF_CLIP_VERSION_ORIGINAL || v === RF_CLIP_VERSION_CORRECTED) {
+        const { data: rfTasks } = await supabase.from('RF_tasks')
+          .select('id, status')
+          .eq('user_id', userId).eq('group_id', groupId).eq('tab', tab);
+        if (!rfTasks || rfTasks.length === 0) return { ...base, scenario: 'simple-delete' };
+        const allCompleted = rfTasks.every((t: any) => t.status === 'completed_final');
+        return { ...base, scenario: allCompleted ? 'rf-folder-completed' : 'rf-folder-active' };
+      }
+
       // MG prompts (v24, v25) — mirror TTV-prompt resolution but against MG_prompt_tasks/MG_tasks.
       // No dedicated 'mg-*' scenarios exist yet, so reuse the TTV scenario tokens which carry the
       // same semantic ("prompts-only file with a downstream batch pipeline").
@@ -2518,12 +2727,12 @@ export default function Documents() {
 
   // Check if a document version is a text file (story, prompts, etc.)
   const isTextDocument = (version: number): boolean => {
-    return [1, 2, 3, 4, 12, 13, 16, 17, 20, 21, 24, 25].includes(version);
+    return [1, 2, 3, 4, 12, 13, 16, 17, 20, 21, 24, 25, RF_PROMPT_VERSION_ORIGINAL, RF_PROMPT_VERSION_CORRECTED].includes(version);
   };
 
   // Check if a document version is a prompt file (should warn about editing only in prompt boxes)
   const isPromptDocument = (version: number): boolean => {
-    return [3, 4, 12, 13, 16, 17, 20, 21, 24, 25].includes(version);
+    return [3, 4, 12, 13, 16, 17, 20, 21, 24, 25, RF_PROMPT_VERSION_ORIGINAL, RF_PROMPT_VERSION_CORRECTED].includes(version);
   };
 
   // Check if a document is a single audio file
@@ -2753,12 +2962,17 @@ export default function Documents() {
     } else if (version === 13) {
       baseLabel = 'Corrected TTV Prompts';
     } else if (version === 14) {
-      baseLabel =
-        doc.title?.startsWith('RF Outputs:') || doc.file_path?.includes('/RF-')
-          ? 'Real Footage Clips'
-          : 'Original TTV Videos';
+      baseLabel = 'Original TTV Videos';
     } else if (version === 15) {
       baseLabel = 'Corrected TTV Videos';
+    } else if (version === RF_PROMPT_VERSION_ORIGINAL) {
+      baseLabel = 'Original RF Prompts';
+    } else if (version === RF_PROMPT_VERSION_CORRECTED) {
+      baseLabel = 'Corrected RF Prompts';
+    } else if (version === RF_CLIP_VERSION_ORIGINAL) {
+      baseLabel = 'Real Footage Clips';
+    } else if (version === RF_CLIP_VERSION_CORRECTED) {
+      baseLabel = 'Corrected Real Footage Clips';
     } else if (version === 16) {
       baseLabel = 'ITV Image Prompts';
     } else if (version === 17) {
@@ -2788,7 +3002,7 @@ export default function Documents() {
     }
 
     // Never add variant numbers for video folder types
-    if (version === 14 || version === 15 || version === 22 || version === 23 || version === 26 || version === 27) {
+    if (isVideoClipFolderVersion(version)) {
       return baseLabel;
     }
 
@@ -2821,7 +3035,11 @@ export default function Documents() {
       }
     } else if (version === 12 || version === 13) {
       return 'text-status-inactive';
+    } else if (version === RF_PROMPT_VERSION_ORIGINAL || version === RF_PROMPT_VERSION_CORRECTED) {
+      return 'text-status-inactive';
     } else if (version === 14 || version === 15) {
+      return 'text-status-pending';
+    } else if (version === RF_CLIP_VERSION_ORIGINAL || version === RF_CLIP_VERSION_CORRECTED) {
       return 'text-status-pending';
     } else if (version === 16 || version === 17) {
       return 'text-status-inactive';
@@ -3053,7 +3271,7 @@ export default function Documents() {
                                 <Folder className="h-4 w-4 mr-2" />
                                 {getDocumentLabel(original, allDocs)}
                               </button>
-                            ) : (original.version === 14 || original.version === 15 || original.version === 22 || original.version === 23 || original.version === 26 || original.version === 27) ? (
+                            ) : isVideoClipFolderVersion(original.version || 0) ? (
                               <button
                                 onClick={() => handleViewVideos(original)}
                                 className="flex items-center hover:underline"
@@ -3103,7 +3321,7 @@ export default function Documents() {
                             Created on {formatDate(original.created_at)}
                           </p>
                           {/* Show file size for v5-11, v14-15, v18/v19, v22/v23, v26/v27; word count for text docs (incl. v12/v13 TTV, v16/v17/v20/v21 ITV, v24/v25 MG prompt docs) */}
-                          {original.version && ((original.version >= 5 && original.version <= 11) || original.version === 14 || original.version === 15 || original.version === 18 || original.version === 19 || original.version === 22 || original.version === 23 || original.version === 26 || original.version === 27) ? (
+                          {original.version && ((original.version >= 5 && original.version <= 11) || isVideoClipFolderVersion(original.version) || original.version === 18 || original.version === 19) ? (
                             original.file_size != null && (
                               <p className="text-sm text-text-dim">
                                 {formatFileSize(original.file_size)}
@@ -3119,9 +3337,9 @@ export default function Documents() {
                         </div>
                         </div>
                         <div className="mt-2 sm:mt-0 sm:ml-0 flex space-x-2">
-                          {(original.version === 5 || original.version === 6 || original.version === 9 || original.version === 10 || original.version === 14 || original.version === 15 || original.version === 18 || original.version === 19 || original.version === 22 || original.version === 23 || original.version === 26 || original.version === 27) ? (
+                          {(original.version === 5 || original.version === 6 || original.version === 9 || original.version === 10 || isVideoClipFolderVersion(original.version || 0) || original.version === 18 || original.version === 19) ? (
                             <button
-                              onClick={() => handleDownloadFolderAsZip(original, original.version === 9 || original.version === 10, original.version === 14 || original.version === 15 || original.version === 22 || original.version === 23 || original.version === 26 || original.version === 27)}
+                              onClick={() => handleDownloadFolderAsZip(original, original.version === 9 || original.version === 10, isMp4ZipFolderVersion(original.version || 0))}
                               className={`flex items-center px-3 py-2 rounded-lg transition-colors ${
                                 downloadingZips[original.id]
                                   ? 'bg-surface-elevated text-text-dim cursor-not-allowed'
@@ -3215,6 +3433,10 @@ export default function Documents() {
                                 handleTTVPromptDeleteClick(original);
                               } else if (original.version === 14 || original.version === 15) {
                                 handleTTVFolderDeleteClick(original);
+                              } else if (original.version === RF_PROMPT_VERSION_ORIGINAL || original.version === RF_PROMPT_VERSION_CORRECTED) {
+                                handleRFPromptDeleteClick(original);
+                              } else if (original.version === RF_CLIP_VERSION_ORIGINAL || original.version === RF_CLIP_VERSION_CORRECTED) {
+                                handleRFFolderDeleteClick(original);
                               } else if (original.version === 16 || original.version === 17) {
                                 handleITVImagePromptDeleteClick(original);
                               } else if (original.version === 18 || original.version === 19) {
@@ -3280,7 +3502,7 @@ export default function Documents() {
                                 <Folder className="h-4 w-4 mr-2" />
                                 {getDocumentLabel(doc, allDocs)}
                               </button>
-                            ) : (doc.version === 14 || doc.version === 15 || doc.version === 22 || doc.version === 23 || doc.version === 26 || doc.version === 27) ? (
+                            ) : isVideoClipFolderVersion(doc.version || 0) ? (
                               <button
                                 onClick={() => handleViewVideos(doc)}
                                 className="flex items-center hover:underline"
@@ -3330,7 +3552,7 @@ export default function Documents() {
                             Created on {formatDate(doc.created_at)}
                           </p>
                           {/* Show file size for v5-11, v14-15, v18/v19, v22/v23, v26/v27; word count for text docs (incl. v12/v13 TTV, v16/v17/v20/v21 ITV, v24/v25 MG prompt docs) */}
-                          {doc.version && ((doc.version >= 5 && doc.version <= 11) || doc.version === 14 || doc.version === 15 || doc.version === 18 || doc.version === 19 || doc.version === 22 || doc.version === 23 || doc.version === 26 || doc.version === 27) ? (
+                          {doc.version && ((doc.version >= 5 && doc.version <= 11) || isVideoClipFolderVersion(doc.version) || doc.version === 18 || doc.version === 19) ? (
                             doc.file_size != null && (
                               <p className="text-sm text-text-dim">
                                 {formatFileSize(doc.file_size)}
@@ -3346,9 +3568,9 @@ export default function Documents() {
                         </div>
                         </div>
                         <div className="mt-2 sm:mt-0 sm:ml-0 flex space-x-2">
-                          {(doc.version === 5 || doc.version === 6 || doc.version === 9 || doc.version === 10 || doc.version === 14 || doc.version === 15 || doc.version === 18 || doc.version === 19 || doc.version === 22 || doc.version === 23 || doc.version === 26 || doc.version === 27) ? (
+                          {(doc.version === 5 || doc.version === 6 || doc.version === 9 || doc.version === 10 || isVideoClipFolderVersion(doc.version || 0) || doc.version === 18 || doc.version === 19) ? (
                             <button
-                              onClick={() => handleDownloadFolderAsZip(doc, doc.version === 9 || doc.version === 10, doc.version === 14 || doc.version === 15 || doc.version === 22 || doc.version === 23 || doc.version === 26 || doc.version === 27)}
+                              onClick={() => handleDownloadFolderAsZip(doc, doc.version === 9 || doc.version === 10, isMp4ZipFolderVersion(doc.version || 0))}
                               className={`flex items-center px-3 py-2 rounded-lg transition-colors ${
                                 downloadingZips[doc.id]
                                   ? 'bg-surface-elevated text-text-dim cursor-not-allowed'
@@ -3442,6 +3664,10 @@ export default function Documents() {
                                 handleTTVPromptDeleteClick(doc);
                               } else if (doc.version === 14 || doc.version === 15) {
                                 handleTTVFolderDeleteClick(doc);
+                              } else if (doc.version === RF_PROMPT_VERSION_ORIGINAL || doc.version === RF_PROMPT_VERSION_CORRECTED) {
+                                handleRFPromptDeleteClick(doc);
+                              } else if (doc.version === RF_CLIP_VERSION_ORIGINAL || doc.version === RF_CLIP_VERSION_CORRECTED) {
+                                handleRFFolderDeleteClick(doc);
                               } else if (doc.version === 16 || doc.version === 17) {
                                 handleITVImagePromptDeleteClick(doc);
                               } else if (doc.version === 18 || doc.version === 19) {
@@ -3554,7 +3780,7 @@ export default function Documents() {
           <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
             <div className="bg-surface-primary rounded-xl max-w-md w-full p-8 shadow-2xl border border-border">
               <div className="flex items-start mb-6">
-                {(deleteConfirmModal.scenario === 'video-active' || deleteConfirmModal.scenario === 'image-generator-active' || deleteConfirmModal.scenario === 'image-folder-active' || deleteConfirmModal.scenario === 'audio-tts-active' || deleteConfirmModal.scenario === 'ttv-prompts-active' || deleteConfirmModal.scenario === 'ttv-folder-active' || deleteConfirmModal.scenario === 'itv-image-prompts-active' || deleteConfirmModal.scenario === 'itv-image-folder-active' || deleteConfirmModal.scenario === 'itv-video-prompts-active' || deleteConfirmModal.scenario === 'itv-folder-active') ? (
+                {(deleteConfirmModal.scenario === 'video-active' || deleteConfirmModal.scenario === 'image-generator-active' || deleteConfirmModal.scenario === 'image-folder-active' || deleteConfirmModal.scenario === 'audio-tts-active' || deleteConfirmModal.scenario === 'ttv-prompts-active' || deleteConfirmModal.scenario === 'ttv-folder-active' || deleteConfirmModal.scenario === 'rf-prompts-active' || deleteConfirmModal.scenario === 'rf-folder-active' || deleteConfirmModal.scenario === 'itv-image-prompts-active' || deleteConfirmModal.scenario === 'itv-image-folder-active' || deleteConfirmModal.scenario === 'itv-video-prompts-active' || deleteConfirmModal.scenario === 'itv-folder-active') ? (
                   <div className="flex-shrink-0 w-10 h-10 rounded-full bg-status-warning/50 flex items-center justify-center mr-4">
                     <svg className="h-5 w-5 text-status-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -3567,7 +3793,7 @@ export default function Documents() {
                 )}
                 <div>
                   <h3 className="text-lg font-semibold text-white mb-2">
-                    {(deleteConfirmModal.scenario === 'video-active' || deleteConfirmModal.scenario === 'image-generator-active' || deleteConfirmModal.scenario === 'image-folder-active' || deleteConfirmModal.scenario === 'audio-tts-active' || deleteConfirmModal.scenario === 'ttv-prompts-active' || deleteConfirmModal.scenario === 'ttv-folder-active' || deleteConfirmModal.scenario === 'itv-image-prompts-active' || deleteConfirmModal.scenario === 'itv-image-folder-active' || deleteConfirmModal.scenario === 'itv-video-prompts-active' || deleteConfirmModal.scenario === 'itv-folder-active') ? 'Stop Active Generation & Delete?' : 'Delete File?'}
+                    {(deleteConfirmModal.scenario === 'video-active' || deleteConfirmModal.scenario === 'image-generator-active' || deleteConfirmModal.scenario === 'image-folder-active' || deleteConfirmModal.scenario === 'audio-tts-active' || deleteConfirmModal.scenario === 'ttv-prompts-active' || deleteConfirmModal.scenario === 'ttv-folder-active' || deleteConfirmModal.scenario === 'rf-prompts-active' || deleteConfirmModal.scenario === 'rf-folder-active' || deleteConfirmModal.scenario === 'itv-image-prompts-active' || deleteConfirmModal.scenario === 'itv-image-folder-active' || deleteConfirmModal.scenario === 'itv-video-prompts-active' || deleteConfirmModal.scenario === 'itv-folder-active') ? 'Stop Active Generation & Delete?' : 'Delete File?'}
                   </h3>
                   <p className="text-sm text-text-muted leading-relaxed">
                     {deleteConfirmModal.scenario === 'simple-delete' && (
@@ -3617,6 +3843,18 @@ export default function Documents() {
                     )}
                     {deleteConfirmModal.scenario === 'ttv-folder-active' && (
                       <><span className="text-status-warning font-medium">Warning:</span> There is an active Text-To-Video generation in progress for <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>. Deleting this folder will stop the generation and all unfinished video clips will be lost.</>
+                    )}
+                    {deleteConfirmModal.scenario === 'rf-prompts-completed' && (
+                      <>Are you sure you want to delete <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>? This will also remove the completion screen from the Real Footage page.</>
+                    )}
+                    {deleteConfirmModal.scenario === 'rf-prompts-active' && (
+                      <><span className="text-status-warning font-medium">Warning:</span> There is an active Real Footage generation in progress for <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>. Deleting this file will stop the generation and all unfinished clips will be lost.</>
+                    )}
+                    {deleteConfirmModal.scenario === 'rf-folder-completed' && (
+                      <>Are you sure you want to delete the Real Footage clips folder <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>? This will also remove the completion screen from the Real Footage page.</>
+                    )}
+                    {deleteConfirmModal.scenario === 'rf-folder-active' && (
+                      <><span className="text-status-warning font-medium">Warning:</span> There is an active Real Footage generation in progress for <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>. Deleting this folder will stop the generation and all unfinished clips will be lost.</>
                     )}
                     {deleteConfirmModal.scenario === 'itv-image-prompts-completed' && (
                       <>Are you sure you want to delete <span className="text-white font-medium">"{deleteConfirmModal.doc.title}"</span>? This will also remove the ITV image prompts generation display.</>
@@ -3856,6 +4094,9 @@ export default function Documents() {
                         )}
                         {(textPreviewModal.doc.version === 12 || textPreviewModal.doc.version === 13) && (
                           <span className="text-status-warning">[Video Prompt: (Edit the text here if needed)]</span>
+                        )}
+                        {(textPreviewModal.doc.version === RF_PROMPT_VERSION_ORIGINAL || textPreviewModal.doc.version === RF_PROMPT_VERSION_CORRECTED) && (
+                          <span className="text-status-warning">[RF Prompt: (Edit the text here if needed)]</span>
                         )}
                         {(textPreviewModal.doc.version === 16 || textPreviewModal.doc.version === 17) && (
                           <span className="text-status-warning">[ITV Image Prompt: (Edit the text here if needed)]</span>

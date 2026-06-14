@@ -2,6 +2,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { verifyAuth } from '../_shared/utils.ts';
 import { getCorsHeaders } from '../_shared/cors.ts';
+import { balanceClipDurationsToTotal, clampRFClipDuration } from '../_shared/rfClipDuration.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SECRET_KEY') ?? '';
@@ -220,7 +221,7 @@ async function resetStuckTasks(groupId: string, userId: string, tab: number = 1,
   }
 }
 
-// ─── Compile final TTV document ───────────────────────────────────────────────
+// ─── Compile final RF prompt document ─────────────────────────────────────────
 
 async function compileFinalRFDocument(
   userId: string,
@@ -236,7 +237,7 @@ async function compileFinalRFDocument(
   tab: number = 1,
 ): Promise<{ documentId: string; filePath: string; videoDuration: number }> {
   try {
-    console.log(`Compiling final TTV document for group ${groupId}, tab ${tab}`);
+    console.log(`Compiling final RF prompt document for group ${groupId}, tab ${tab}`);
 
     const { data, error } = await supabase
       .from('RF_prompt_tasks')
@@ -248,17 +249,34 @@ async function compileFinalRFDocument(
       .gt('batch_number', 0)
       .order('batch_number', { ascending: true });
 
-    if (error || !data || data.length === 0) throw new Error(`Failed to fetch TTV tasks for compilation: ${error?.message ?? 'No data'}`);
+    if (error || !data || data.length === 0) throw new Error(`Failed to fetch RF prompt tasks for compilation: ${error?.message ?? 'No data'}`);
 
     const videoDuration: number = data[0]?.video_duration ?? 0;
 
-    // Aggregate all [{text, prompt}] items from every batch into one flat array
-    const allPrompts: Array<{ text: string; prompt: string }> = [];
+    const { data: ctxRows } = await supabase
+      .from('RF_prompt_context')
+      .select('total_audio_duration')
+      .eq('group_id', groupId)
+      .eq('tab', tab)
+      .limit(1);
+    const targetAudioTotal = Number(ctxRows?.[0]?.total_audio_duration) || 0;
+
+    // Aggregate all [{text, prompt, video_duration?}] items from every batch into one flat array
+    const allPrompts: Array<{ text: string; prompt: string; video_duration: number }> = [];
     for (const task of data) {
       if (!task.batch_output) continue;
       try {
         const parsed = JSON.parse(task.batch_output);
-        if (Array.isArray(parsed)) allPrompts.push(...parsed);
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (!item?.prompt) continue;
+            allPrompts.push({
+              text: item.text ?? '',
+              prompt: item.prompt,
+              video_duration: clampRFClipDuration(Number(item.video_duration) || videoDuration || 5),
+            });
+          }
+        }
       } catch (_) {
         console.error(`Could not parse batch_output for batch ${task.batch_number}`);
       }
@@ -266,29 +284,33 @@ async function compileFinalRFDocument(
 
     if (allPrompts.length === 0) throw new Error('No prompts found in completed batches — cannot compile');
 
+    if (targetAudioTotal > 0) {
+      balanceClipDurationsToTotal(allPrompts, targetAudioTotal);
+    }
+
     const fullContent = JSON.stringify(allPrompts, null, 2);
-    console.log(`Compiled ${allPrompts.length} TTV prompts, JSON size: ${fullContent.length} chars`);
+    console.log(`Compiled ${allPrompts.length} RF prompts, JSON size: ${fullContent.length} chars`);
 
     const sanitizedTitle = title.replace(/[^a-zA-Z0-9\s-]/g, '.').toLowerCase().trim().replace(/\s+/g, '-');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const finalFilePath = `documents/${userId}/${groupId}/ttv-prompts-${sanitizedTitle}_${timestamp}.json`;
+    const finalFilePath = `documents/${userId}/${groupId}/rf-prompts-${sanitizedTitle}_${timestamp}.json`;
 
     const { error: uploadError } = await supabase.storage
       .from('stories')
       .upload(finalFilePath, new TextEncoder().encode(fullContent), { contentType: 'application/json' });
 
     if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
-    console.log(`Uploaded TTV prompts to ${finalFilePath}`);
+    console.log(`Uploaded RF prompts to ${finalFilePath}`);
 
     const { data: urlData } = supabase.storage.from('stories').getPublicUrl(finalFilePath);
-    if (!urlData?.publicUrl) throw new Error('Failed to retrieve public URL for TTV document');
+    if (!urlData?.publicUrl) throw new Error('Failed to retrieve public URL for RF prompt document');
 
     const documentId = crypto.randomUUID();
     const { error: docError } = await supabase
       .from('story_documents')
       .insert({
         id: documentId,
-        title: `TTV Prompt: ${title}`,
+        title: `RF Prompt: ${title}`,
         description,
         word_count: countWords(fullContent),
         version,
@@ -306,8 +328,8 @@ async function compileFinalRFDocument(
         tab,
       });
 
-    if (docError) throw new Error(`Failed to save TTV document: ${docError.message}`);
-    console.log(`Saved story_documents record for TTV: ${title}, ID: ${documentId}`);
+    if (docError) throw new Error(`Failed to save RF prompt document: ${docError.message}`);
+    console.log(`Saved story_documents record for RF prompt: ${title}, ID: ${documentId}`);
 
     // Trigger size calculation asynchronously (fire-and-forget)
     triggerSizeCalculation(documentId, finalFilePath, version).catch(err =>
@@ -338,7 +360,7 @@ async function compileFinalRFDocument(
       ttv_prompt_document_id: documentId,
     });
 
-    return { documentId, filePath: finalFilePath, videoDuration };
+    return { documentId, filePath: finalFilePath, videoDuration: allPrompts[0]?.video_duration ?? videoDuration };
 
   } catch (err: any) {
     console.error(`Error compiling final TTV document: ${err.message}`);
@@ -629,7 +651,7 @@ async function processRFTask(
     };
 
     const chunkResult = await callGenerateRFPrompts(payload, task.id, batchNumber);
-    const results: Array<{ text: string; prompt: string }> = chunkResult.results;
+    const results: Array<{ text: string; prompt: string; video_duration?: number }> = chunkResult.results;
     const input_tokens: number = chunkResult.input_tokens ?? 0;
     const output_tokens: number = chunkResult.output_tokens ?? 0;
 
@@ -641,7 +663,7 @@ async function processRFTask(
       throw new Error(msg);
     }
 
-    // Store batch_output as JSON string [{text, prompt}, ...]
+    // Store batch_output as JSON string [{text, prompt, video_duration}, ...]
     const batchOutput = JSON.stringify(results);
 
     await supabase.from('RF_prompt_tasks')

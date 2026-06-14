@@ -10,6 +10,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { getCorsHeaders } from '../_shared/cors.ts';
 import { planMaxTokensForUser } from '../_shared/planMaps.ts';
+import { RF_CLIP_VERSION_ORIGINAL } from '../_shared/rfVersions.ts';
+import { RF_STOCK_TOKENS_PER_CLIP } from '../_shared/rfTokenCosts.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SECRET_KEY') ?? '';
@@ -19,9 +21,6 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
-
-/** Flat token cost per stock clip download (testing / individual prompt). */
-const RF_STOCK_TOKENS_PER_CLIP = 500;
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -52,7 +51,7 @@ async function getUserIdFromToken(authHeader: string | null): Promise<string | n
   }
 }
 
-async function callGenerateRF(query: string): Promise<{
+async function callGenerateRF(query: string, targetDuration?: number): Promise<{
   status: string;
   video_url?: string;
   stock_source?: string;
@@ -62,7 +61,11 @@ async function callGenerateRF(query: string): Promise<{
   const res = await fetch(`${supabaseUrl}/functions/v1/generate-RF`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', apikey: supabaseServiceRoleKey },
-    body: JSON.stringify({ mode: 'search', query }),
+    body: JSON.stringify({
+      mode: 'search',
+      query,
+      target_duration: targetDuration,
+    }),
   });
   const text = await res.text();
   let data: Record<string, unknown>;
@@ -221,7 +224,7 @@ Deno.serve(async (req: Request) => {
       total_prompts: 1,
       status: 'running',
       progress: 0,
-      version: 14,
+      version: RF_CLIP_VERSION_ORIGINAL,
       video_model: 'stock',
       video_duration,
       tab,
@@ -264,7 +267,7 @@ Deno.serve(async (req: Request) => {
     EdgeRuntime.waitUntil(
       (async () => {
         try {
-          const gen = await callGenerateRF(finalQuery.trim());
+          const gen = await callGenerateRF(finalQuery.trim(), video_duration);
           if (gen.status !== 'completed' || !gen.video_url) {
             throw new Error(gen.error ?? 'No stock clip found');
           }

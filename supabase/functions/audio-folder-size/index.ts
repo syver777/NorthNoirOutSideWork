@@ -87,14 +87,14 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ error: 'Missing required fields', code: 400 }), { status: 400, headers: responseHeaders });
     }
 
-    const validVersions = [9, 10, 14, 15, 22, 23, 26, 27];
+    const validVersions = [9, 10, 14, 15, 22, 23, 26, 27, 30, 31];
     if (!validVersions.includes(version)) {
       await logError('Invalid version for this function', new Error(`Version ${version} not supported`));
       return new Response(JSON.stringify({ error: 'Invalid version for this function', code: 400 }), { status: 400, headers: responseHeaders });
     }
 
-    // v14/v15 = TTV video folders (.mp4); v22/v23 = ITV video folders (.mp4); v26/v27 = MG video folders (.mp4); v9/v10 = audio folders (.mp3/.wav)
-    const isMp4Folder = version === 14 || version === 15 || version === 22 || version === 23 || version === 26 || version === 27;
+    // v14/v15 = TTV; v22/v23 = ITV; v26/v27 = MG; v30/v31 = RF clip folders (.mp4); v9/v10 = audio (.mp3/.wav)
+    const isMp4Folder = version === 14 || version === 15 || version === 22 || version === 23 || version === 26 || version === 27 || version === 30 || version === 31;
 
     let totalSize = 0;
 

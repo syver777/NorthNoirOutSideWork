@@ -1,8 +1,14 @@
 // setup-RF-tasks/index.ts
-// Sets up RF_tasks rows from a compiled TTV prompts JSON file (version 12/13 → 14/15)
+// Sets up RF_tasks rows from a compiled RF prompts JSON file (version 28/29 → 30/31)
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { verifyAuth } from '../_shared/utils.ts';
 import { getCorsHeaders } from '../_shared/cors.ts';
+import {
+  RF_CLIP_VERSION_CORRECTED,
+  RF_CLIP_VERSION_ORIGINAL,
+  rfClipVersion,
+} from '../_shared/rfVersions.ts';
+import { clampRFClipDuration } from '../_shared/rfClipDuration.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SECRET_KEY') ?? '';
@@ -20,7 +26,7 @@ const SUPPORTED_VIDEO_MODELS = ['stock'];
 interface SetupRequest {
   user_id: string;
   group_id: string;
-  file_path: string;       // path to the TTV prompts JSON (version 12/13 doc)
+  file_path: string;       // path to the RF prompts JSON (version 28/29 doc)
   story_title: string;
   description: string;
   doc_id: string;
@@ -33,9 +39,10 @@ interface SetupRequest {
   high_res?: boolean;
 }
 
-interface TTVPromptItem {
+interface RFPromptItem {
   text: string;    // original story segment text
-  prompt: string;  // generated video prompt
+  prompt: string;  // generated stock search query
+  video_duration?: number;
 }
 
 async function logError(message: string, error: any) {
@@ -152,7 +159,7 @@ Deno.serve(async (req: Request) => {
     const validatedLanguage = supportedLanguages.includes(language ?? '') ? language : 'english';
 
     // ── Variant collision detection (same logic as setup-image-tasks) ───────────
-    const versionsToCheck = [14, 15];
+    const versionsToCheck = [RF_CLIP_VERSION_ORIGINAL, RF_CLIP_VERSION_CORRECTED];
 
     const [existingTasksRes, existingDocsRes] = await Promise.all([
       supabase.from('RF_tasks').select('variant')
@@ -176,7 +183,7 @@ Deno.serve(async (req: Request) => {
       finalVariant = Math.max(...Array.from(existingVariants)) + 1;
     }
 
-    console.log(`TTV variant: requested=${variant}, existing=[${Array.from(existingVariants).sort().join(', ')}], using=${finalVariant}`);
+    console.log(`RF variant: requested=${variant}, existing=[${Array.from(existingVariants).sort().join(', ')}], using=${finalVariant}`);
 
     // ── Fetch source document metadata ─────────────────────────────────────────
     const { data: docData, error: docError } = await supabase
@@ -190,8 +197,8 @@ Deno.serve(async (req: Request) => {
     const { is_corrected } = docData;
     const documentLanguage = docData.language || validatedLanguage;
 
-    // version 12 (original TTV prompts) → 14; version 13 (corrected) → 15
-    const outputVersion = is_corrected ? 15 : 14;
+    // version 28 (original RF prompts) → 30; version 29 (corrected) → 31
+    const outputVersion = rfClipVersion(!!is_corrected);
 
     // ── Determine if this is a video pipeline call ───────────────────────────
     // Check if a video_tasks row exists with ttv='ttv' for this group.
@@ -212,16 +219,16 @@ Deno.serve(async (req: Request) => {
       console.warn(`Could not check video_tasks for video_process: ${err.message}`);
     }
 
-    // ── Download and parse TTV prompts JSON ────────────────────────────────────
+    // ── Download and parse RF prompts JSON ─────────────────────────────────────
     const { data: fileData, error: fileError } = await supabase
       .storage.from('stories').download(file_path);
 
-    if (fileError) throw new Error(`Failed to download TTV prompts file: ${fileError.message}`);
+    if (fileError) throw new Error(`Failed to download RF prompts file: ${fileError.message}`);
 
     const content = await fileData.text();
     if (!content || content.length === 0) throw new Error('TTV prompts file is empty');
 
-    let prompts: TTVPromptItem[];
+    let prompts: RFPromptItem[];
     try {
       prompts = JSON.parse(content);
     } catch (_) {
@@ -249,7 +256,7 @@ Deno.serve(async (req: Request) => {
       description,
       file_path,
       text_part: item.text || '',
-      // batch stores: [{ text: original_segment, prompt: video_prompt, index }]
+      // batch stores: [{ text: original_segment, prompt: search_query, index }]
       batch: [{ text: item.text || '', prompt: item.prompt.trim(), index: i + 1 }],
       batch_output: '',
       total_batches: totalBatches,
@@ -266,7 +273,7 @@ Deno.serve(async (req: Request) => {
       version: outputVersion,
       folder_timestamp: timestamp,
       video_model: effectiveVideoModel,
-      video_duration,
+      video_duration: clampRFClipDuration(Number(item.video_duration) || video_duration),
       video_process: videoProcess,
       language: documentLanguage,
       tab,

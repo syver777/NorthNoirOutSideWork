@@ -37,6 +37,8 @@ interface SetupRequest {
   userTokenBalance: number;
   audio_clip?: boolean;  high_res?: boolean;
   videoProcess?: boolean;     // when true (called from video pipeline), skip token balance check
+  audio_file_path?: string;
+  audio_folder_path?: string;
 }
 
 interface JobRequest {
@@ -76,6 +78,7 @@ function getTokenMultiplier(model: string): number {
 // Mirrors src/components/VideoModelSelector.tsx.
 
 const TTV_VIDEO_MODEL_CONFIGS: Record<string, { name: string; defaultDuration: number; durationOptions?: number[]; durationMin?: number; durationMax?: number }> = {
+  stock:             { name: 'Stock footage',           defaultDuration: 5,    durationMin: 2, durationMax: 60 },
   seedance_pro_fast: { name: 'Seedance 1.0 Pro Fast',   defaultDuration: 6,    durationMin: 2, durationMax: 12 },
   ltx23_fast:        { name: 'LTX 2.3 Fast',            defaultDuration: 6,    durationOptions: [6, 10, 16] },
   grok:              { name: 'Grok Video',              defaultDuration: 5,    durationMin: 2, durationMax: 15 },
@@ -95,8 +98,8 @@ const TTV_VIDEO_MODEL_CONFIGS: Record<string, { name: string; defaultDuration: n
 function clampVideoDurationForModel(model: string, requested: number): { duration: number; clamped: boolean } {
   const cfg = TTV_VIDEO_MODEL_CONFIGS[model];
   if (!cfg) {
-    if (requested > 0 && requested <= 16) return { duration: requested, clamped: false };
-    return { duration: Math.min(Math.max(requested, 1), 16), clamped: true };
+    if (requested >= 2 && requested <= 60) return { duration: requested, clamped: false };
+    return { duration: Math.min(Math.max(requested, 2), 60), clamped: true };
   }
   if (cfg.durationOptions && cfg.durationOptions.length > 0) {
     if (cfg.durationOptions.includes(requested)) return { duration: requested, clamped: false };
@@ -628,6 +631,8 @@ Deno.serve(async (req) => {
       userTokenBalance,
       audio_clip = false,
       high_res = false,
+      audio_file_path,
+      audio_folder_path,
     } = requestData;
     const videoProcess = requestData.videoProcess === true;
 
@@ -649,6 +654,15 @@ Deno.serve(async (req) => {
     if (!video_model || typeof video_model !== 'string') throw new Error('Missing or invalid video_model');
     if (isNaN(parsedVideoDuration) || parsedVideoDuration <= 0) throw new Error('Invalid video_duration');
     if (isNaN(parsedTotalAudioDuration) || parsedTotalAudioDuration <= 0) throw new Error('Invalid totalAudioDuration');
+
+    const resolvedAudioPath = (typeof audio_file_path === 'string' && audio_file_path.trim())
+      ? audio_file_path.trim()
+      : (typeof audio_folder_path === 'string' && audio_folder_path.trim())
+        ? audio_folder_path.trim()
+        : null;
+    if (!videoProcess && !resolvedAudioPath) {
+      throw new Error('Missing audio_file_path or audio_folder_path — select narration audio for Existing Document runs');
+    }
 
     // Defensive clamp: upstream (plan-video / LLM) has occasionally sent the
     // total runtime as `video_duration` instead of a per-clip length. Snap
@@ -750,6 +764,8 @@ Deno.serve(async (req) => {
           video_model,
           video_duration: effectiveVideoDuration,
           total_videos,
+          total_audio_duration: parsedTotalAudioDuration,
+          audio_file_path: resolvedAudioPath,
           audio_clip,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -880,6 +896,8 @@ Deno.serve(async (req) => {
         audio_clip,
         high_res,
         videoProcess,
+        total_audio_duration: parsedTotalAudioDuration,
+        audio_file_path: resolvedAudioPath,
       },
     });
     if (jobError) throw new Error(`Failed to insert TTV job data: ${jobError.message}`);

@@ -2323,6 +2323,34 @@ export async function resetTTVTabToDefaults(
 }
 
 /**
+ * Reset Real Footage tab to defaults
+ */
+export async function resetRFTabToDefaults(
+  userId: string,
+  tabNumber: number
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('tabs')
+      .update({
+        status: 'idle',
+        group_id: null,
+        title: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId)
+      .eq('page', 'rf')
+      .eq('tab_number', tabNumber);
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('Error resetting RF tab to defaults:', error);
+    return false;
+  }
+}
+
+/**
  * Stop video generation for a specific groupId - cleanup database tasks and storage files
  * This is called when closing a tab that's in 'generating' status
  */

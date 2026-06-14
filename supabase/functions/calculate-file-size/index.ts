@@ -62,6 +62,7 @@ serve(async (req: Request) => {
     // Single-file versions: story docs, TTV prompt JSONs, ITV prompt JSONs, MG prompt JSONs
     if ((version >= 1 && version <= 4) || version === 7 || version === 8 ||
         version === 12 || version === 13 ||
+        version === 28 || version === 29 ||
         version === 16 || version === 17 ||   // ITV image-prompt JSON
         version === 20 || version === 21 ||   // ITV video-prompt JSON
         version === 24 || version === 25) {   // MG prompt JSON
@@ -133,8 +134,9 @@ serve(async (req: Request) => {
       totalSize = file_size;
     } else if (version === 14 || version === 15 ||
                version === 22 || version === 23 ||   // v22/23 = ITV video folder (.mp4)
-               version === 26 || version === 27) {   // v26/27 = MG video folder (.mp4)
-      // TTV, ITV, and MG video folders: delegate to the audio-folder-size edge function
+               version === 26 || version === 27 ||   // v26/27 = MG video folder (.mp4)
+               version === 30 || version === 31) {   // v30/31 = RF clip folder (.mp4)
+      // TTV, ITV, MG, and RF video folders: delegate to the audio-folder-size edge function
       const response = await fetchWithDenoFallback('audio-folder-size', {
         method: 'POST',
         headers: {

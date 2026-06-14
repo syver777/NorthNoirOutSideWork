@@ -7,6 +7,14 @@ interface GenerateRFBody {
   mode: 'search';
   query: string;
   segment_text?: string;
+  /** Target clip length in seconds (2–60). Picks stock closest to this duration. */
+  target_duration?: number;
+  video_duration?: number;
+  /** Redo: user feedback merged into search keywords (e.g. "more underwater"). */
+  revision_feedback?: string;
+  /** Redo: skip the clip being replaced so a different result is chosen. */
+  exclude_stock_source?: string;
+  exclude_stock_id?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -35,7 +43,18 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ error: 'Missing query' }), { status: 400, headers });
     }
 
-    const result = await searchStockFootage(query);
+    const rawDuration = body.target_duration ?? body.video_duration;
+    const targetDuration = typeof rawDuration === 'number' && rawDuration > 0 ? rawDuration : undefined;
+
+    const excludeStock =
+      body.exclude_stock_source && body.exclude_stock_id
+        ? { source: body.exclude_stock_source, id: String(body.exclude_stock_id) }
+        : undefined;
+
+    const result = await searchStockFootage(query, targetDuration, {
+      revisionFeedback: body.revision_feedback?.trim() || undefined,
+      excludeStock,
+    });
     if (result.status === 'failed') {
       return new Response(JSON.stringify(result), { status: 422, headers });
     }
@@ -48,6 +67,7 @@ Deno.serve(async (req: Request) => {
         stock_id: result.clip!.id,
         title: result.clip!.title,
         duration: result.clip!.duration,
+        target_duration: targetDuration ?? null,
       }),
       { status: 200, headers },
     );

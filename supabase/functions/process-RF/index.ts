@@ -2,6 +2,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { verifyAuth } from '../_shared/utils.ts';
 import { getCorsHeaders } from '../_shared/cors.ts';
+import { RF_CLIP_VERSION_ORIGINAL } from '../_shared/rfVersions.ts';
+import { RF_STOCK_TOKENS_PER_CLIP } from '../_shared/rfTokenCosts.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SECRET_KEY') ?? '';
@@ -27,7 +29,7 @@ async function logError(message: string, error: unknown) {
   } catch { /* ignore */ }
 }
 
-async function callGenerateRF(query: string): Promise<{
+async function callGenerateRF(query: string, targetDuration?: number): Promise<{
   status: string;
   video_url?: string;
   stock_source?: string;
@@ -37,7 +39,11 @@ async function callGenerateRF(query: string): Promise<{
   const res = await fetch(`${supabaseUrl}/functions/v1/generate-RF`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', apikey: supabaseServiceRoleKey },
-    body: JSON.stringify({ mode: 'search', query }),
+    body: JSON.stringify({
+      mode: 'search',
+      query,
+      target_duration: targetDuration,
+    }),
   });
   const text = await res.text();
   let data: Record<string, unknown>;
@@ -113,7 +119,7 @@ async function compileFinalRFDocument(
 
   await supabase.from('story_documents').insert({
     id: documentId,
-    title: `RF Outputs: ${cleanTitle}`,
+    title: `Real Footage Clips: ${cleanTitle}`,
     description,
     version,
     is_corrected: isCorrected,
@@ -166,6 +172,8 @@ async function completeTask(task: Record<string, unknown>, remoteUrl: string, st
       video_url: storagePath,
       stock_source: stockSource,
       stock_id: stockId,
+      tokens: RF_STOCK_TOKENS_PER_CLIP,
+      token_updated: true,
       progress: 100,
       updated_at: new Date().toISOString(),
     })
@@ -179,7 +187,7 @@ async function completeTask(task: Record<string, unknown>, remoteUrl: string, st
       String(task.description ?? task.story_title),
       variant,
       !!task.is_corrected,
-      (task.version as number) ?? 14,
+      (task.version as number) ?? RF_CLIP_VERSION_ORIGINAL,
       String(task.folder_timestamp),
       tab,
     );
@@ -254,7 +262,8 @@ Deno.serve(async (req: Request) => {
     EdgeRuntime.waitUntil(
       (async () => {
         try {
-          const gen = await callGenerateRF(searchQuery.trim());
+          const targetDuration = Number(task.video_duration) > 0 ? Number(task.video_duration) : undefined;
+          const gen = await callGenerateRF(searchQuery.trim(), targetDuration);
           if (gen.status !== 'completed' || !gen.video_url) {
             await supabase
               .from('RF_tasks')
